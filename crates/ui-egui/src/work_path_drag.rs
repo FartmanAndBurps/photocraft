@@ -28,6 +28,8 @@ pub struct State {
     owns_release: bool,
     /// A stale or explicitly cleared Work Path scope must be reselected before Cmd+T.
     target_invalid: bool,
+    // An ordinary outline miss consumes release without reporting cancellation.
+    missed: bool,
 }
 
 fn work_target(app: &PhotocraftApp) -> bool {
@@ -51,16 +53,17 @@ fn work_target(app: &PhotocraftApp) -> bool {
     }
     st.doc.work_path.is_some()
 }
-fn valid(app: &PhotocraftApp, target: &Selection) -> bool {
+fn same_target(app: &PhotocraftApp, target: &Selection) -> bool {
     app.ui.selected_path == target.selected_path
         && work_target(app)
         && target.component.is_none_or(|i| target.path.subpaths.get(i).is_some())
-        && app.session.active().is_some_and(|st| {
-            st.doc.id.0 == target.document
-                && st.revision == target.revision
-                && st.active_layer == target.layer
-                && st.doc.work_path.as_ref() == Some(&target.path)
-        })
+        && app
+            .session
+            .active()
+            .is_some_and(|st| st.doc.id.0 == target.document && st.active_layer == target.layer && st.doc.work_path.as_ref() == Some(&target.path))
+}
+fn valid(app: &PhotocraftApp, target: &Selection) -> bool {
+    same_target(app, target) && app.session.active().is_some_and(|st| st.revision == target.revision)
 }
 fn snapshot(app: &PhotocraftApp, component: Option<usize>) -> Option<Selection> {
     let st = app.session.active()?;
@@ -160,6 +163,7 @@ pub fn press(app: &mut PhotocraftApp, at: [f64; 2]) {
     app.ui.work_path_drag.target_invalid = false;
     app.ui.work_path_drag.gesture = None;
     app.ui.work_path_drag.owns_release = false;
+    app.ui.work_path_drag.missed = false;
     if !app.ui.view.shows(app.ui.view.show.target_path) || !work_target(app) || displacement(at, at).is_none() {
         app.ui.work_path_drag.selection = None;
         return;
@@ -174,6 +178,7 @@ pub fn press(app: &mut PhotocraftApp, at: [f64; 2]) {
         Some(photocraft_vector::edit::Hit::Anchor([s, _]) | photocraft_vector::edit::Hit::Segment([s, _], _)) => s,
         _ => {
             app.ui.work_path_drag.selection = None;
+            app.ui.work_path_drag.missed = true;
             return;
         }
     };
@@ -197,6 +202,17 @@ pub fn motion(app: &mut PhotocraftApp, at: [f64; 2]) {
     }
 }
 pub fn after_command(app: &mut PhotocraftApp, id: &str) {
+    if matches!(id, "view.colorSamplers.add" | "view.colorSamplers.move" | "view.colorSamplers.delete" | "view.colorSamplers.clear")
+        && app
+            .ui
+            .work_path_drag
+            .selection
+            .as_ref()
+            .is_some_and(|s| same_target(app, s) && app.session.active().is_some_and(|st| s.revision.checked_add(1) == Some(st.revision)))
+        && let (Some(selection), Some(st)) = (app.ui.work_path_drag.selection.as_mut(), app.session.active())
+    {
+        selection.revision = st.revision;
+    }
     if app.ui.work_path_drag.selection.as_ref().is_some_and(|s| {
         !valid(app, s)
             || id == "layer.select"
@@ -223,11 +239,16 @@ pub fn owns_drag(app: &PhotocraftApp) -> bool {
 }
 pub fn cancel(app: &mut PhotocraftApp) {
     app.ui.work_path_drag.gesture = None;
+    app.ui.work_path_drag.missed = false;
     if app.drag.as_ref().is_some_and(|d| d.tool == Tool::PathSelection) {
         app.drag = None;
     }
 }
 pub fn reconcile(app: &mut PhotocraftApp, focused: bool) {
+    if !focused {
+        cancel(app);
+        return;
+    }
     if app.ui.work_path_drag.selection.as_ref().is_some_and(|s| !valid(app, s)) {
         clear_selection(app);
         return;
@@ -244,8 +265,9 @@ pub fn finish(app: &mut PhotocraftApp, start: [f64; 2], end: [f64; 2]) -> Option
     if !std::mem::take(&mut app.ui.work_path_drag.owns_release) {
         return None;
     }
+    let missed = std::mem::take(&mut app.ui.work_path_drag.missed);
     let Some(d) = app.ui.work_path_drag.gesture.take() else {
-        return Some(Err("Work Path drag was cancelled or missed the outline.".into()));
+        return Some(if missed { Ok(()) } else { Err("Work Path drag was cancelled.".into()) });
     };
     if app.ui.tool != Tool::PathSelection || d.start != start || !app.ui.work_path_drag.selection.as_ref().is_some_and(|s| valid(app, s)) {
         clear_selection(app);
