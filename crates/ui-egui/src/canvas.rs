@@ -3476,7 +3476,9 @@ fn hdr_preview(app: &PhotocraftApp, doc: &photocraft_doc::Document) -> Option<[f
 /// Draw one canvas view and handle its input. `primary` = main window (tools active).
 pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect, mut view: View, primary: bool) -> View {
     let ctx = ui.ctx().clone();
-    crate::work_path_drag::reconcile(app, ctx.input(|i| i.focused));
+    if primary {
+        crate::work_path_drag::reconcile(app, ctx.input(|i| i.focused));
+    }
     crate::shape_drag::reconcile(app, ctx.input(|i| i.focused));
     if crate::shape_drag::active(app) {
         ctx.request_repaint();
