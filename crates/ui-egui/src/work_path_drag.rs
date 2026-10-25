@@ -26,10 +26,14 @@ pub struct State {
     gesture: Option<Gesture>,
     // Cancelled or stale gestures consume late release instead of delegating to another target.
     owns_release: bool,
+    /// A stale or explicitly cleared Work Path scope must be reselected before Cmd+T.
+    target_invalid: bool,
 }
 
 fn work_target(app: &PhotocraftApp) -> bool {
-    let Some(st) = app.session.active() else { return false };
+    let Some(st) = app.session.active() else {
+        return false;
+    };
     if app.ui.selected_path.as_deref().is_some_and(|name| name != "work") {
         return false;
     }
@@ -82,6 +86,7 @@ pub fn select_whole(app: &mut PhotocraftApp) {
     if app.session.active().is_some_and(|st| st.doc.work_path.is_some()) {
         focus_work(app);
         app.ui.work_path_drag.selection = snapshot(app, None);
+        app.ui.work_path_drag.target_invalid = false;
     } else {
         app.ui.work_path_drag.selection = None;
     }
@@ -89,6 +94,7 @@ pub fn select_whole(app: &mut PhotocraftApp) {
 pub fn clear_selection(app: &mut PhotocraftApp) {
     cancel(app);
     app.ui.work_path_drag.selection = None;
+    app.ui.work_path_drag.target_invalid = true;
 }
 pub fn selected_component(app: &PhotocraftApp) -> Option<usize> {
     if app.ui.tool != Tool::PathSelection {
@@ -96,6 +102,52 @@ pub fn selected_component(app: &PhotocraftApp) -> Option<usize> {
     }
     app.ui.work_path_drag.selection.as_ref().filter(|s| valid(app, s))?.component
 }
+/// Resolve only a current, explicitly selected Work Path component. Stale scope is an
+/// error, never a request to transform all paths or the active pixel layer.
+pub fn component_transform(app: &PhotocraftApp) -> Result<Option<(serde_json::Value, Path)>, String> {
+    if app.ui.tool != Tool::PathSelection {
+        return Ok(None);
+    }
+    let Some(selection) = app.ui.work_path_drag.selection.as_ref() else {
+        return if app.ui.work_path_drag.target_invalid && work_target(app) {
+            Err("Work Path selection was invalidated; select its row or component again.".into())
+        } else {
+            Ok(None)
+        };
+    };
+    if !valid(app, selection) {
+        return Err("Work Path selection changed; reselect it before transforming.".into());
+    }
+    let Some(index) = selection.component else {
+        return Ok(None);
+    };
+    let subpath = selection.path.subpaths.get(index).ok_or("Invalid Work Path component")?.clone();
+    let params = json!({"name":"work","subpaths":[index],"document":selection.document,"revision":selection.revision});
+    let path = Path { subpaths: vec![subpath], fill_rule: selection.path.fill_rule, inverted: selection.path.inverted };
+    Ok(Some((params, path)))
+}
+pub fn transformed(app: &mut PhotocraftApp, index: usize) {
+    if app.ui.tool == Tool::PathSelection && work_target(app) {
+        app.ui.work_path_drag.selection = snapshot(app, Some(index));
+        app.ui.work_path_drag.target_invalid = app.ui.work_path_drag.selection.is_none();
+    }
+}
+pub fn guard_transform(app: &PhotocraftApp) -> Result<(), String> {
+    component_transform(app).map(|_| ())
+}
+pub fn transform_params(app: &PhotocraftApp, mut params: serde_json::Value) -> Result<serde_json::Value, String> {
+    if let Some((target, _)) = component_transform(app)?
+        && params.get("subpaths").is_none()
+    {
+        if params.get("document").is_some() || params.get("revision").is_some() {
+            return Err("Incomplete component selector; reselect it.".into());
+        }
+        let object = params.as_object_mut().ok_or("Path transform parameters must be an object")?;
+        object.extend(target.as_object().ok_or("Invalid component target")?.clone());
+    }
+    Ok(params)
+}
+
 fn displacement(start: [f64; 2], end: [f64; 2]) -> Option<[f64; 2]> {
     let delta = [end[0] - start[0], end[1] - start[1]];
     if !start.iter().chain(end.iter()).all(|v| v.is_finite()) || !delta.iter().all(|v| v.is_finite() && v.abs() <= 1_000_000.0) {
@@ -105,6 +157,7 @@ fn displacement(start: [f64; 2], end: [f64; 2]) -> Option<[f64; 2]> {
 }
 /// Outline hit selects one component; an explicit whole selection stays whole during a drag.
 pub fn press(app: &mut PhotocraftApp, at: [f64; 2]) {
+    app.ui.work_path_drag.target_invalid = false;
     app.ui.work_path_drag.gesture = None;
     app.ui.work_path_drag.owns_release = false;
     if !app.ui.view.shows(app.ui.view.show.target_path) || !work_target(app) || displacement(at, at).is_none() {
@@ -128,10 +181,13 @@ pub fn press(app: &mut PhotocraftApp, at: [f64; 2]) {
     focus_work(app);
     // Capture focus_work's updated target token, and preserve only a VALID whole scope.
     app.ui.work_path_drag.selection = snapshot(app, (!whole).then_some(index));
+    app.ui.work_path_drag.target_invalid = false;
     app.ui.work_path_drag.gesture = Some(Gesture { start: at, end: at, hit: index });
 }
 pub fn motion(app: &mut PhotocraftApp, at: [f64; 2]) {
-    let Some(d) = app.ui.work_path_drag.gesture.as_ref() else { return };
+    let Some(d) = app.ui.work_path_drag.gesture.as_ref() else {
+        return;
+    };
     if app.ui.tool != Tool::PathSelection || !app.ui.work_path_drag.selection.as_ref().is_some_and(|s| valid(app, s)) || displacement(d.start, at).is_none() {
         clear_selection(app);
         return;
@@ -176,7 +232,9 @@ pub fn reconcile(app: &mut PhotocraftApp, focused: bool) {
         clear_selection(app);
         return;
     }
-    let Some(d) = app.ui.work_path_drag.gesture.as_ref() else { return };
+    let Some(d) = app.ui.work_path_drag.gesture.as_ref() else {
+        return;
+    };
     let lost = app.drag.as_ref().is_none_or(|drag| drag.tool != Tool::PathSelection || drag.start != d.start);
     if !focused || lost || app.ui.tool != Tool::PathSelection {
         cancel(app);
@@ -186,19 +244,25 @@ pub fn finish(app: &mut PhotocraftApp, start: [f64; 2], end: [f64; 2]) -> Option
     if !std::mem::take(&mut app.ui.work_path_drag.owns_release) {
         return None;
     }
-    let Some(d) = app.ui.work_path_drag.gesture.take() else { return Some(Err("Work Path drag was cancelled or missed the outline.".into())) };
+    let Some(d) = app.ui.work_path_drag.gesture.take() else {
+        return Some(Err("Work Path drag was cancelled or missed the outline.".into()));
+    };
     if app.ui.tool != Tool::PathSelection || d.start != start || !app.ui.work_path_drag.selection.as_ref().is_some_and(|s| valid(app, s)) {
         clear_selection(app);
         return Some(Err("Work Path selection is stale; no geometry was moved.".into()));
     }
-    let Some([dx, dy]) = displacement(start, end) else { return Some(Err("Invalid Work Path displacement.".into())) };
+    let Some([dx, dy]) = displacement(start, end) else {
+        return Some(Err("Invalid Work Path displacement.".into()));
+    };
     if dx == 0.0 && dy == 0.0 {
         if let Some(s) = &mut app.ui.work_path_drag.selection {
             s.component = Some(d.hit);
         }
         return Some(Ok(()));
     }
-    let Some(selection) = app.ui.work_path_drag.selection.take() else { return Some(Err("Select a Work Path again.".into())) };
+    let Some(selection) = app.ui.work_path_drag.selection.take() else {
+        return Some(Err("Select a Work Path again.".into()));
+    };
     let component = selection.component;
     let result = if let Some(index) = component {
         let anchors = photocraft_vector::edit::subpath_anchors(&selection.path, index);

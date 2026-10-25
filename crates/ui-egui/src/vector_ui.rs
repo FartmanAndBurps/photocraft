@@ -114,7 +114,9 @@ fn shape_geometry(o: &ToolOptions, tool: Tool, start: [f64; 2], end: [f64; 2], m
             return None;
         }
         match tool {
-            Tool::Rectangle if o.corner_radius > 0.0 => json!({"kind": "roundedRect", "rect": rect, "radii": vec![o.corner_radius; 4]}),
+            Tool::Rectangle if o.corner_radius > 0.0 => {
+                json!({"kind": "roundedRect", "rect": rect, "radii": vec![o.corner_radius; 4]})
+            }
             Tool::Rectangle | Tool::CustomShape => json!({"kind": "rect", "rect": rect}),
             Tool::EllipseShape => json!({"kind": "ellipse", "rect": rect}),
             Tool::Triangle => json!({"kind": "polygon", "rect": rect, "sides": 3}),
@@ -138,7 +140,9 @@ pub fn shape_bounds(o: &ToolOptions, tool: Tool, start: [f64; 2], end: [f64; 2],
 
 /// Finish a Shape-tool drag: ⇧ constrains proportions, ⌥ draws from the centre.
 pub fn finish_shape(app: &mut PhotocraftApp, tool: Tool, start: [f64; 2], end: [f64; 2], mods: egui::Modifiers) {
-    let Some(mut p) = shape_geometry(&app.ui.tool_options, tool, start, end, mods) else { return };
+    let Some(mut p) = shape_geometry(&app.ui.tool_options, tool, start, end, mods) else {
+        return;
+    };
     if tool == Tool::CustomShape {
         // ⇧ keeps the shape's proportions (the rect is already squared).
         if let Ok(rect) = serde_json::from_value(p["rect"].take()) {
@@ -241,7 +245,9 @@ fn shape_preview(app: &PhotocraftApp, tool: Tool, start: [f64; 2], end: [f64; 2]
 
 /// Shape-tool drag preview using the same path and vector stroke geometry as the commit.
 pub fn draw_shape_preview(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform, tool: Tool, start: [f64; 2], end: [f64; 2], mods: egui::Modifiers) {
-    let Some(mut shape) = shape_preview(app, tool, start, end, mods) else { return };
+    let Some(mut shape) = shape_preview(app, tool, start, end, mods) else {
+        return;
+    };
     let path = shape.path.clone();
     let origin = xf.to_screen(0.0, 0.0);
     let x = xf.to_screen(1.0, 0.0) - origin;
@@ -283,7 +289,9 @@ fn on_closing_anchor(pen: &PenPath, x: f64, y: f64, tol: f64) -> bool {
 /// anchor, or the Curvature Pen over the first of three anchors or more? The canvas shows the
 /// close-path pointer there, as Photoshop does (#4596).
 pub fn closes_path_at(app: &PhotocraftApp, tool: Tool, x: f64, y: f64) -> bool {
-    let Some(pen) = app.ui.pen.as_ref().filter(|p| !p.dragging && p.moving.is_none()) else { return false };
+    let Some(pen) = app.ui.pen.as_ref().filter(|p| !p.dragging && p.moving.is_none()) else {
+        return false;
+    };
     match tool {
         Tool::Pen => !pen.curvature && on_closing_anchor(pen, x, y, 6.0 / app.point_zoom().max(0.01) as f64),
         Tool::CurvaturePen => pen.curvature && pen.knots.len() >= 3 && curvature_hit(app, x, y) == Some(0),
@@ -379,7 +387,9 @@ pub fn pen_undo_last_point(app: &mut PhotocraftApp) -> bool {
     if !cancel_stale(app) {
         return false;
     }
-    let Some(pen) = app.ui.pen.as_mut() else { return false };
+    let Some(pen) = app.ui.pen.as_mut() else {
+        return false;
+    };
     // A resumed path's own anchors are not the draft's to take back: undoing past the ones added
     // since it resumed drops the draft and leaves the path as it was (#6593).
     if pen.resumes.as_ref().is_some_and(|r| pen.knots.len() <= r.was.knots.len()) {
@@ -414,7 +424,9 @@ pub fn pen_undo_last_point(app: &mut PhotocraftApp) -> bool {
 
 pub fn pen_up(app: &mut PhotocraftApp) {
     let jitter = 2.0 / f64::from(app.point_zoom().max(0.01));
-    let Some(pen) = app.ui.pen.as_mut() else { return };
+    let Some(pen) = app.ui.pen.as_mut() else {
+        return;
+    };
     pen.dragging = false;
     pen.adjusting_last = false;
     pen.adjusting_in = false;
@@ -433,8 +445,12 @@ pub fn pen_up(app: &mut PhotocraftApp) {
 /// ⌥/Alt during a Pen drag breaks the pair of handles being pulled out: from then on only the
 /// outgoing handle follows the pointer and the incoming curve stays as it is (#3306).
 pub fn pen_break_handle(app: &mut PhotocraftApp) {
-    let Some(pen) = app.ui.pen.as_mut().filter(|p| p.dragging && !p.adjusting_last) else { return };
-    let Some(i) = pen.knots.len().checked_sub(1) else { return };
+    let Some(pen) = app.ui.pen.as_mut().filter(|p| p.dragging && !p.adjusting_last) else {
+        return;
+    };
+    let Some(i) = pen.knots.len().checked_sub(1) else {
+        return;
+    };
     if !pen.unlinked.contains(&i) {
         pen.unlinked.push(i);
     }
@@ -445,8 +461,12 @@ pub fn pen_break_handle(app: &mut PhotocraftApp) {
 /// drag turns it and the other handle stays put (#3306, #6077). False when the press misses both.
 pub fn pen_grab_handle(app: &mut PhotocraftApp, x: f64, y: f64) -> bool {
     let tol = 6.0 / f64::from(app.point_zoom().max(0.01));
-    let Some(pen) = app.ui.pen.as_mut() else { return false };
-    let Some((i, k)) = pen.knots.len().checked_sub(1).zip(pen.knots.last()) else { return false };
+    let Some(pen) = app.ui.pen.as_mut() else {
+        return false;
+    };
+    let Some((i, k)) = pen.knots.len().checked_sub(1).zip(pen.knots.last()) else {
+        return false;
+    };
     let dist = |p: [f64; 2]| (p[0] - x).hypot(p[1] - y);
     // Both handles show only while the outgoing one is pulled out (`draw_overlay`).
     if k[2] == k[0] {
@@ -523,7 +543,9 @@ pub(crate) fn pen_path(pen: &PenPath) -> Path {
 /// The Pen path being drawn becomes `path`'s first subpath, edited with ⌘/Ctrl (Direct Selection);
 /// drawing carries on from its last anchor. A Curvature Pen path keeps following its anchors.
 pub(crate) fn pen_replace(app: &mut PhotocraftApp, path: &Path) {
-    let Some(pen) = app.ui.pen.as_mut() else { return };
+    let Some(pen) = app.ui.pen.as_mut() else {
+        return;
+    };
     let knots = path.subpaths.first().map(|s| s.knots.as_slice()).unwrap_or_default();
     pen.knots = knots.iter().map(knot_points).collect();
     pen.unlinked = knots.iter().enumerate().filter(|(_, k)| !k.smooth).map(|(i, _)| i).collect();
@@ -547,9 +569,13 @@ pub fn cancel_stale(app: &mut PhotocraftApp) -> bool {
         app.ui.pen_doc = None;
         return true;
     }
-    let Some(owner) = app.ui.pen_doc.filter(|d| Some(*d) != active) else { return true };
+    let Some(owner) = app.ui.pen_doc.filter(|d| Some(*d) != active) else {
+        return true;
+    };
     if let Some(index) = app.session.documents().iter().position(|d| d.doc.id == owner) {
-        let Some(mut pen) = app.ui.pen.clone() else { return true };
+        let Some(mut pen) = app.ui.pen.clone() else {
+            return true;
+        };
         if pen.curvature {
             curvature_refresh(&mut pen, false);
         }
@@ -581,7 +607,9 @@ pub fn pen_commit(app: &mut PhotocraftApp, closed: bool) {
     if !cancel_stale(app) {
         return;
     }
-    let Some(mut pen) = app.ui.pen.take() else { return };
+    let Some(mut pen) = app.ui.pen.take() else {
+        return;
+    };
     app.ui.pen_doc = None;
     if app.ui.direct_selection.target == Some(crate::direct_select::PathRef::Pen) {
         // Its anchors are no longer the Pen's: the committed path is another path.
@@ -713,13 +741,17 @@ fn with_resumed_subpath(doc: &Document, r: &Resumed, drawn: &Value) -> Option<Va
 /// points at indices `straight` were ⌥-clicked: the segment into each one stays straight.
 pub fn freeform_finish(app: &mut PhotocraftApp, points: &[[f64; 3]], straight: &[usize]) {
     let trace: Vec<[f64; 2]> = points.iter().map(|p| [p[0], p[1]]).collect();
-    let (Some(first), Some(last)) = (trace.first(), trace.last()) else { return };
+    let (Some(first), Some(last)) = (trace.first(), trace.last()) else {
+        return;
+    };
     let tol = 6.0 / app.point_zoom().max(0.01) as f64;
     let length: f64 = trace.windows(2).map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1])).sum();
     let closed = (first[0] - last[0]).hypot(first[1] - last[1]) < tol && length > 4.0 * tol;
     let fit = f64::from(app.ui.tool_options.curve_fit);
     let pen = if straight.is_empty() {
-        let Some(sub) = photocraft_vector::trace::fit_trace(&trace, fit, closed) else { return };
+        let Some(sub) = photocraft_vector::trace::fit_trace(&trace, fit, closed) else {
+            return;
+        };
         let knots = sub.knots.iter().map(knot_points).collect();
         let unlinked = sub.knots.iter().enumerate().filter(|(_, k)| !k.smooth).map(|(i, _)| i).collect();
         (PenPath { knots, unlinked, ..Default::default() }, sub.closed)
@@ -859,8 +891,12 @@ pub fn curvature_toggle(app: &mut PhotocraftApp, x: f64, y: f64) {
         crate::direct_select::curvature_toggle_active(app, [x, y]);
         return;
     }
-    let Some(i) = curvature_hit(app, x, y) else { return };
-    let Some(pen) = app.ui.pen.as_mut() else { return };
+    let Some(i) = curvature_hit(app, x, y) else {
+        return;
+    };
+    let Some(pen) = app.ui.pen.as_mut() else {
+        return;
+    };
     if let Some(at) = pen.unlinked.iter().position(|&c| c == i) {
         pen.unlinked.remove(at);
     } else {
@@ -908,7 +944,9 @@ pub fn with_active_path(app: &PhotocraftApp, id: &str, params: Value) -> Value {
     if !takes_path_mask(id) || params.get("path").is_some() {
         return params;
     }
-    let Some(sel) = selected_document_path(app) else { return params };
+    let Some(sel) = selected_document_path(app) else {
+        return params;
+    };
     match params {
         Value::Object(mut m) => {
             m.insert("path".into(), json!(sel));
@@ -998,6 +1036,11 @@ fn target_path(app: &PhotocraftApp) -> Option<(PathTarget, Path)> {
 pub(crate) fn free_transform_path(app: &PhotocraftApp) -> Option<(Value, Path)> {
     if !matches!(app.ui.tool, Tool::PathSelection | Tool::DirectSelection) {
         return None;
+    }
+    match crate::work_path_drag::component_transform(app) {
+        Ok(Some(component)) => return Some(component),
+        Err(_) => return None,
+        Ok(None) => {}
     }
     let (target, path) = target_path(app)?;
     path.control_bounds()?;
@@ -1095,19 +1138,25 @@ pub fn path_selection_finish(app: &mut PhotocraftApp, start: [f64; 2], end: [f64
     let (dx, dy) = (end[0] - start[0], end[1] - start[1]);
     let tol = 6.0 / f64::from(app.point_zoom().max(0.01));
     if dx.abs() + dy.abs() < 0.5 {
-        let Some(st) = app.session.active() else { return };
+        let Some(st) = app.session.active() else {
+            return;
+        };
         if let Some(id) = pick_shape_at(&st.doc, start, tol) {
             let _ = app.run("layer.select", json!({"layer": id.0}));
         }
         return;
     }
     if target_path(app).is_none() {
-        let Some(st) = app.session.active() else { return };
+        let Some(st) = app.session.active() else {
+            return;
+        };
         if let Some(id) = pick_shape_at(&st.doc, start, tol) {
             let _ = app.run("layer.select", json!({"layer": id.0}));
         }
     }
-    let Some((target, path)) = target_path(app) else { return };
+    let Some((target, path)) = target_path(app) else {
+        return;
+    };
     let _ = match target {
         PathTarget::Shape(id) => app.run("shape.edit", json!({"layer": id, "move": [dx.round(), dy.round()]})),
         PathTarget::VectorMask(id) => {
