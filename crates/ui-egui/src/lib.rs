@@ -1292,6 +1292,9 @@ impl PhotocraftApp {
             }
             self.sync_mask_targets();
         }
+        if result.is_ok() && (id == "layer.select" || id.starts_with("channel.target") || id == "path.delete") {
+            self.ui.shape_work_path_target = None;
+        }
         result
     }
 
@@ -1681,9 +1684,6 @@ impl PhotocraftApp {
         };
         if events_enabled {
             self.session.edit_prefs(|prefs| prefs.script_events.enabled = true);
-        }
-        if result.is_ok() && (id == "layer.select" || id.starts_with("channel.target") || id == "path.delete") {
-            self.ui.shape_work_path_target = None;
         }
         result
     }
