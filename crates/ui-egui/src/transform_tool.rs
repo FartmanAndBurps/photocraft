@@ -3054,7 +3054,9 @@ fn transform_fields(app: &mut PhotocraftApp, ui: &mut egui::Ui, t: &TransformSes
         let (mut h, mut v) = (skew_h as f32, t.skew_v as f32);
         let lim = -SKEW_LIMIT_DEG..=SKEW_LIMIT_DEG;
         lbl(ui, "H:");
-        let rh = crate::widgets::value_field(ui, &mut h, lim.clone(), "°", 56.0).accessible_name(tl!("Set horizontal skew")).on_hover_text(tl!("Set horizontal skew"));
+        let rh = crate::widgets::value_field(ui, &mut h, lim.clone(), "°", 56.0)
+            .accessible_name(tl!("Set horizontal skew"))
+            .on_hover_text(tl!("Set horizontal skew"));
         lbl(ui, "V:");
         let rv = crate::widgets::value_field(ui, &mut v, lim, "°", 56.0).accessible_name(tl!("Set vertical skew")).on_hover_text(tl!("Set vertical skew"));
         if rh.changed() || rv.changed() {
