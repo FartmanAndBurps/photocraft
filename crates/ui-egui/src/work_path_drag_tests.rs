@@ -13,6 +13,8 @@ fn app() -> PhotocraftApp {
     app.ui.view.extras = true;
     app.ui.view.show.target_path = true;
     app.sync_views();
+    // These tests cover Milestone1 WHOLE-path behaviour; select the complete Work Path.
+    select_whole(&mut app);
     app
 }
 fn work(app: &PhotocraftApp) -> Path {

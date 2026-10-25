@@ -1170,25 +1170,24 @@ pub(crate) fn curve_points(p0: [f64; 2], c0: [f64; 2], c1: [f64; 2], p1: [f64; 2
 }
 
 /// Screen polylines for a path (one per subpath).
+pub(crate) fn subpath_lines(s: &photocraft_doc::vector::Subpath, xf: &dyn Fn([f64; 2]) -> Pos2) -> (Vec<Pos2>, bool) {
+    let n = s.knots.len();
+    let mut pts = Vec::new();
+    let segs = if s.closed { n } else { n.saturating_sub(1) };
+    for i in 0..segs {
+        let (a, b) = (&s.knots[i], &s.knots[(i + 1) % n]);
+        pts.extend(curve_points([a.anchor.x, a.anchor.y], [a.out_ctrl.x, a.out_ctrl.y], [b.in_ctrl.x, b.in_ctrl.y], [b.anchor.x, b.anchor.y], xf));
+    }
+    if pts.is_empty()
+        && let Some(k) = s.knots.first()
+    {
+        pts.push(xf([k.anchor.x, k.anchor.y]));
+    }
+    (pts, s.closed)
+}
+
 pub(crate) fn path_lines(path: &Path, xf: &dyn Fn([f64; 2]) -> Pos2) -> Vec<(Vec<Pos2>, bool)> {
-    path.subpaths
-        .iter()
-        .map(|s| {
-            let n = s.knots.len();
-            let mut pts = Vec::new();
-            let segs = if s.closed { n } else { n.saturating_sub(1) };
-            for i in 0..segs {
-                let (a, b) = (&s.knots[i], &s.knots[(i + 1) % n]);
-                pts.extend(curve_points([a.anchor.x, a.anchor.y], [a.out_ctrl.x, a.out_ctrl.y], [b.in_ctrl.x, b.in_ctrl.y], [b.anchor.x, b.anchor.y], xf));
-            }
-            if pts.is_empty()
-                && let Some(k) = s.knots.first()
-            {
-                pts.push(xf([k.anchor.x, k.anchor.y]));
-            }
-            (pts, s.closed)
-        })
-        .collect()
+    path.subpaths.iter().map(|s| subpath_lines(s, xf)).collect()
 }
 
 /// A path's outline in the accent colour.
@@ -1268,8 +1267,26 @@ pub fn draw_overlay(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform
         if let Some(wp) = &doc.work_path
             && (anchors || app.ui.selected_path.as_deref() == Some("work"))
         {
-            let delta = app.session.active().filter(|st| st.doc.id == doc.id).and_then(|_| crate::work_path_drag::preview(app)).unwrap_or([0.0, 0.0]);
-            draw_path(wp, anchors, delta);
+            let active = app.session.active().is_some_and(|st| st.doc.id == doc.id);
+            let component = active.then(|| crate::work_path_drag::selected_component(app)).flatten();
+            let preview = active.then(|| crate::work_path_drag::preview(app)).flatten();
+            for (index, subpath) in wp.subpaths.iter().enumerate() {
+                let delta = preview.filter(|_| component.is_none_or(|i| i == index)).unwrap_or([0.0, 0.0]);
+                let shown = |q: [f64; 2]| to_scr([q[0] + delta[0], q[1] + delta[1]]);
+                let selected = component == Some(index);
+                let color = if component.is_some() && !selected { accent.gamma_multiply(0.55) } else { accent };
+                let (points, closed) = subpath_lines(subpath, &shown);
+                painter.add(if closed {
+                    egui::Shape::closed_line(points, Stroke::new(1.0, color))
+                } else {
+                    egui::Shape::line(points, Stroke::new(1.0, color))
+                });
+                if anchors {
+                    for k in &subpath.knots {
+                        draw_anchor(painter, shown([k.anchor.x, k.anchor.y]), selected, color);
+                    }
+                }
+            }
         }
         // The saved path selected in the Paths panel is the target path (#6550).
         if let Some(p) = selected_saved_path(app) {
@@ -1937,6 +1954,12 @@ pub fn paths_panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                     action = Some(("path.toSelection", json!({"name": key, "mode": mode})));
                 } else if resp.clicked() {
                     app.ui.selected_path = Some(key.clone());
+                    if key == "work" {
+                        crate::work_path_drag::select_whole(app);
+                    } else {
+                        crate::work_path_drag::clear_selection(app);
+                        app.ui.shape_work_path_target = None;
+                    }
                 }
                 // As in Photoshop, double-clicking a saved path's name renames it, and double-clicking
                 // the Work Path asks for the name to save it under (#6238).
