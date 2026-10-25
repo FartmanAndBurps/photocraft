@@ -667,6 +667,11 @@ pub fn handle(app: &mut PhotocraftApp, ctx: &egui::Context) {
             return;
         }
     }
+    if crate::shape_drag::owns(app) && app.drag.is_some() && ctx.input_mut(|i| i.consume_key(i.modifiers, Key::Escape)) {
+        crate::shape_drag::cancel(app);
+        ctx.request_repaint();
+        return;
+    }
     if crate::work_path_drag::owns_drag(app)
         && app.drag.as_ref().is_some_and(|d| d.tool == crate::state::Tool::PathSelection)
         && ctx.input_mut(|i| i.consume_key(i.modifiers, Key::Escape))
