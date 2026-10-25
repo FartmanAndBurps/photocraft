@@ -310,9 +310,7 @@ pub(crate) fn defer_canvas(app: &PhotocraftApp, press: Option<[f64; 2]>, mods: e
         return false;
     };
     let id = match app.ui.tool {
-        Tool::PathSelection => {
-            crate::vector_ui::pick_shape_at(&st.doc, at, 6.0 / f64::from(app.point_zoom().max(0.01))).or(st.active_layer)
-        }
+        Tool::PathSelection => crate::vector_ui::pick_shape_at(&st.doc, at, 6.0 / f64::from(app.point_zoom().max(0.01))).or(st.active_layer),
         Tool::Move => {
             if mods.alt || app.session.prefs().interface.show_bounding_box_when_dragging_layer || photocraft_engine::float_cmds::floating(st).is_some() {
                 return false;
