@@ -1485,6 +1485,9 @@ pub struct UiState {
     /// Explicit Work Path created by a shape; document id and prior active layer.
     #[serde(skip)]
     pub shape_work_path_target: Option<(u64, Option<u64>)>,
+    /// Whole-Work-Path drag preview is never persisted into preferences or documents.
+    #[serde(skip)]
+    pub work_path_drag: crate::work_path_drag::State,
     /// Layers panel kind filter ("pixel", "adjustment", "type", "shape", "smart"); empty = all.
     #[serde(default)]
     pub layer_filter: Vec<String>,
@@ -1689,6 +1692,7 @@ impl Default for UiState {
             corner_radius: None,
             selected_path: None,
             shape_work_path_target: None,
+            work_path_drag: Default::default(),
             panels: Panels::default(),
             views: Vec::new(),
             dialogs: Vec::new(),
