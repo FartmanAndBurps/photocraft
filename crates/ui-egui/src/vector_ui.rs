@@ -219,6 +219,17 @@ pub(crate) fn shape_work_path_selected(app: &PhotocraftApp) -> bool {
         })
 }
 
+/// Explicit Work Path priority applies to a visible outline hit, not an unrelated Shape press.
+pub(crate) fn shape_work_path_hit(app: &PhotocraftApp, at: [f64; 2], tolerance: f64) -> bool {
+    shape_work_path_selected(app)
+        && app.ui.view.shows(app.ui.view.show.target_path)
+        && app
+            .session
+            .active()
+            .and_then(|st| st.doc.work_path.as_ref())
+            .is_some_and(|path| photocraft_vector::edit::hit(path, photocraft_geom::Point::new(at[0], at[1]), tolerance, &[]).is_some())
+}
+
 /// The preview and command both use the full float tool colours, including transparent paint.
 fn shape_preview(app: &PhotocraftApp, tool: Tool, start: [f64; 2], end: [f64; 2], mods: egui::Modifiers) -> Option<photocraft_doc::ShapeLayer> {
     let o = &app.ui.tool_options;
@@ -1089,7 +1100,9 @@ pub fn path_selection_finish(app: &mut PhotocraftApp, start: [f64; 2], end: [f64
     let tol = 6.0 / f64::from(app.point_zoom().max(0.01));
     if dx.abs() + dy.abs() < 0.5 {
         let Some(st) = app.session.active() else { return };
-        if let Some(id) = pick_shape_at(&st.doc, start, tol) {
+        if !shape_work_path_hit(app, start, tol)
+            && let Some(id) = pick_shape_at(&st.doc, start, tol)
+        {
             let _ = app.run("layer.select", json!({"layer": id.0}));
         }
         return;

@@ -247,3 +247,38 @@ fn saved_paths_pen_settings_and_native_roundtrip_remain_intact() {
     assert_eq!(back.work_path, Some(original));
     assert_eq!(back.paths, saved);
 }
+
+#[test]
+fn work_path_priority_applies_only_to_presses_on_its_outline() {
+    for on_work in [false, true] {
+        let mut app = app();
+        let a = app.run("shape.create", json!({"rect":[10,10,40,30],"fill":"#ff0000"})).unwrap()["layer"].as_u64().unwrap();
+        let b = app.run("shape.create", json!({"rect":[140,100,40,30],"fill":"#0000ff"})).unwrap()["layer"].as_u64().unwrap();
+        app.run("layer.select", json!({"layer":a})).unwrap();
+        create_shape_in_mode(&mut app, json!({"kind":"ellipse","rect":[60,40,60,40]}), true).unwrap();
+        let before = app.session.active().unwrap().doc.clone();
+        let original_work = work(&app);
+        let history = app.session.active().unwrap().history.past_len();
+        app.ui.tool = Tool::PathSelection;
+        app.ui.extras.snap = false;
+        let start = if on_work { [90.0, 40.0] } else { [150.0, 110.0] };
+        for ev in [
+            ToolEvent::Down { x: start[0], y: start[1], pressure: 1.0 },
+            ToolEvent::Move { x: start[0] + 9.0, y: start[1] + 7.0, pressure: 1.0 },
+            ToolEvent::Up { x: start[0] + 9.0, y: start[1] + 7.0 },
+        ] {
+            tool_event(&mut app, ev, egui::Modifiers::NONE);
+        }
+        let after = app.session.active().unwrap();
+        if on_work {
+            assert_eq!(work(&app), original_work.transform(&Affine::translate(9.0, 7.0)));
+            assert_eq!(after.doc.layers, before.layers);
+        } else {
+            assert_eq!(work(&app), original_work, "pressing another Shape must not move the selected Work Path");
+            assert_eq!(after.active_layer, Some(photocraft_doc::LayerId(b)));
+            assert_ne!(after.doc.layer(photocraft_doc::LayerId(b)), before.layer(photocraft_doc::LayerId(b)));
+            assert_eq!(after.doc.layer(photocraft_doc::LayerId(a)), before.layer(photocraft_doc::LayerId(a)));
+        }
+        assert_eq!(after.history.past_len(), history + 1);
+    }
+}
