@@ -166,6 +166,10 @@ pub(crate) fn display_doc(app: &mut PhotocraftApp, idx: usize) -> Option<(Arc<Do
     }
     let d = delta(g.start, g.end)?;
     if d == [0.0, 0.0] {
+        if let Some(g) = app.shape_drag.gesture.as_mut() {
+            g.shown = None;
+            g.shown_end = None;
+        }
         return None;
     }
     if g.shown_end != Some(g.end) {

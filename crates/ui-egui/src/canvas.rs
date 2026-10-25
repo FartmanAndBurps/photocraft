@@ -1554,11 +1554,15 @@ pub(crate) type NavigatorCache = (std::sync::Weak<Document>, u64, u64, egui::Tex
 /// How long adjustment-dialog settings must stay unchanged before the navigator shows them.
 const NAVIGATOR_SETTLE_MS: f64 = 200.0;
 
-/// While a Move or Patch drag or a live paint stroke is under way, the navigator keeps its image
+/// While a Move, Patch or Shape drag or a live paint stroke is under way, the navigator keeps its image
 /// of document `idx` and catches up on release: each step of the drag is a new preview, and a
 /// thumbnail composite of the whole document per step makes painting lag on large images.
 fn navigator_waits_for_drag(app: &PhotocraftApp, idx: usize) -> bool {
-    crate::move_ui::showing(app) || crate::patch_preview::showing(app) || crate::cam_preview::showing(app) || live_stroke(app, idx).is_some()
+    crate::move_ui::showing(app)
+        || crate::patch_preview::showing(app)
+        || crate::cam_preview::showing(app)
+        || live_stroke(app, idx).is_some()
+        || (app.session.active_index() == Some(idx) && crate::shape_drag::active(app))
 }
 
 /// The Navigator panel's image of document `idx`. With the CPU canvas that is the canvas texture

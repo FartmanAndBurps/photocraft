@@ -386,3 +386,31 @@ fn primary_canvas_focus_loss_cancels_shape_drag_without_history_or_late_release(
         assert_eq!(app.session.active().unwrap().history.past_len(), history);
     }
 }
+
+#[test]
+fn returning_to_press_point_clears_prepared_bounds_and_corner_offsets() {
+    for tool in [Tool::PathSelection, Tool::Move] {
+        let (mut app, id, _) = fixture("roundedRect", tool);
+        let original = app.session.active().unwrap().doc.clone();
+        let history = app.session.active().unwrap().history.past_len();
+        down(&mut app);
+        movement(&mut app, [8.5, 6.25]);
+        let (_, first_key) = display_doc(&mut app, 0).unwrap();
+        assert_eq!(shown_offset(&app, id), [8.5, 6.25]);
+        assert!(layer_edges(&app, 0, id).is_some());
+        movement(&mut app, [0.0, 0.0]);
+        assert!(display_doc(&mut app, 0).is_none());
+        assert_eq!(shown_offset(&app, id), [0.0, 0.0]);
+        assert!(layer_edges(&app, 0, id).is_none());
+        assert_eq!(crate::canvas::display_doc(&mut app, 0).0, original);
+        movement(&mut app, [8.5, 6.25]);
+        let (shown, second_key) = display_doc(&mut app, 0).unwrap();
+        assert_ne!(second_key, first_key, "a resumed nonzero offset must prepare fresh state");
+        assert_ne!(shape(&shown, id).path, shape(&original, id).path);
+        movement(&mut app, [0.0, 0.0]);
+        assert!(display_doc(&mut app, 0).is_none());
+        up(&mut app, [0.0, 0.0]);
+        assert_eq!(app.session.active().unwrap().doc, original);
+        assert_eq!(app.session.active().unwrap().history.past_len(), history);
+    }
+}

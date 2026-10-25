@@ -154,3 +154,19 @@ fn shape_canvas_integration_preserves_size_changing_filter_preview_border() {
     assert!(!crate::shape_drag::active(&h.app));
     assert_eq!(h.app.session.active().unwrap().doc.size, photocraft_geom::Size::new(220, 180));
 }
+
+#[test]
+fn navigator_defers_shape_samples_until_release() {
+    for tool in [Tool::PathSelection, Tool::Move] {
+        let mut h = Harness::new(tool, "rect", false);
+        assert!(!navigator_waits_for_drag(&h.app, 0));
+        h.press();
+        h.at(12.25);
+        assert!(crate::shape_drag::active(&h.app));
+        assert!(navigator_waits_for_drag(&h.app, 0), "Shape preview samples must not force Navigator recomposition");
+        assert!(!navigator_waits_for_drag(&h.app, 1), "only the dragged document should wait");
+        let pos = pos2(h.origin[0] + 12.25 * 2.0, h.origin[1] + 2.5);
+        h.frame(vec![Event::PointerButton { pos, button: PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE }]);
+        assert!(!navigator_waits_for_drag(&h.app, 0));
+    }
+}
