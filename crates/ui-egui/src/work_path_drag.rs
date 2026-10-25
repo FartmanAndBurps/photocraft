@@ -139,8 +139,8 @@ pub fn guard_transform(app: &PhotocraftApp) -> Result<(), String> {
     component_transform(app).map(|_| ())
 }
 pub fn transform_params(app: &PhotocraftApp, mut params: serde_json::Value) -> Result<serde_json::Value, String> {
-    if let Some((target, _)) = component_transform(app)?
-        && params.get("subpaths").is_none()
+    if params.get("subpaths").is_none()
+        && let Some((target, _)) = component_transform(app)?
     {
         if params.get("document").is_some() || params.get("revision").is_some() {
             return Err("Incomplete component selector; reselect it.".into());

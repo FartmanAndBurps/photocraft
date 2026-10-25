@@ -309,3 +309,84 @@ fn component_transform_after_sampler_change_uses_current_revision() {
     assert_eq!(moved.subpaths[2], original.subpaths[2]);
     assert_eq!(crate::work_path_drag::selected_component(&app), Some(1));
 }
+
+#[test]
+fn explicit_component_selector_is_independent_of_stale_gui_selection() {
+    for invalidated in [false, true] {
+        let mut app = app();
+        app.session.active_mut().unwrap().revision += 1;
+        if invalidated {
+            crate::work_path_drag::reconcile(&mut app, true);
+        }
+        assert!(crate::work_path_drag::component_transform(&app).is_err());
+        let st = app.session.active().unwrap();
+        let params = json!({"subpaths":[0], "document":st.doc.id.0, "revision":st.revision, "translateX":6.25, "translateY":3.5});
+        let history = st.history.past_len();
+        let mut expected = work(&app);
+        expected.subpaths[0] =
+            photocraft_doc::Path::new(vec![expected.subpaths[0].clone()]).transform(&photocraft_geom::Affine::translate(6.25, 3.5)).subpaths.remove(0);
+        app.run("path.transform", params).expect("a current explicit selector must reach engine validation despite stale GUI state");
+        assert_eq!(work(&app), expected);
+        assert_eq!(app.session.active().unwrap().history.past_len(), history + 1);
+    }
+}
+
+#[test]
+fn explicit_component_selector_errors_still_reach_engine_validation() {
+    for (key, value, message) in [
+        ("document", json!(0), "stale component target"),
+        ("revision", json!(0), "stale component target"),
+        ("document", json!(null), "stale component target"),
+        ("revision", json!(null), "stale component target"),
+        ("subpaths", json!(null), "exactly one component index"),
+        ("subpaths", json!([]), "exactly one component index"),
+        ("subpaths", json!([0, 1]), "exactly one component index"),
+        ("subpaths", json!([-1]), "invalid component index"),
+        ("subpaths", json!(["0"]), "invalid component index"),
+        ("subpaths", json!([99]), "no such Work Path component"),
+    ] {
+        let mut app = app();
+        app.session.active_mut().unwrap().revision += 1;
+        let st = app.session.active().unwrap();
+        let original = st.doc.clone();
+        let history = st.history.past_len();
+        let revision = st.revision;
+        let mut params = json!({"subpaths":[0], "document":st.doc.id.0, "revision":revision, "translateX":6.25});
+        if value.is_null() && key != "subpaths" {
+            params.as_object_mut().unwrap().remove(key);
+        } else {
+            params[key] = value;
+        }
+        assert_eq!(crate::work_path_drag::transform_params(&app, params.clone()).unwrap(), params);
+        let error = app.run("path.transform", params).unwrap_err();
+        assert!(error.contains(message), "{key}: {error}");
+        assert_eq!(app.session.active().unwrap().doc, original);
+        assert_eq!(app.session.active().unwrap().history.past_len(), history);
+        assert_eq!(app.session.active().unwrap().revision, revision);
+    }
+}
+
+#[test]
+fn implicit_component_selector_keeps_gui_scope_and_stale_guard() {
+    for stale in [false, true] {
+        let mut app = app();
+        if stale {
+            app.session.active_mut().unwrap().revision += 1;
+        }
+        let original = work(&app);
+        let history = app.session.active().unwrap().history.past_len();
+        let result = app.run("path.transform", json!({"translateX":6.25, "translateY":3.5}));
+        if stale {
+            assert!(result.unwrap_err().contains("Work Path selection changed"));
+            assert_eq!(work(&app), original);
+            assert_eq!(app.session.active().unwrap().history.past_len(), history);
+        } else {
+            result.unwrap();
+            let mut expected = original;
+            expected.subpaths[1] =
+                photocraft_doc::Path::new(vec![expected.subpaths[1].clone()]).transform(&photocraft_geom::Affine::translate(6.25, 3.5)).subpaths.remove(0);
+            assert_eq!(work(&app), expected);
+            assert_eq!(app.session.active().unwrap().history.past_len(), history + 1);
+        }
+    }
+}
