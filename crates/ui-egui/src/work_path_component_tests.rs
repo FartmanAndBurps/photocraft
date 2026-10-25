@@ -250,3 +250,64 @@ fn overlapping_and_open_components_are_deterministic_transient_and_persist_geome
     let bytes = photocraft_format::save_to_bytes(&app.session.active().unwrap().doc, &Default::default()).unwrap();
     assert_eq!(photocraft_format::load_from_bytes(&bytes).unwrap().work_path, Some(work(&app)));
 }
+
+#[test]
+fn empty_canvas_release_is_a_silent_non_mutating_miss() {
+    let mut app = app();
+    let original = app.session.active().unwrap().doc.clone();
+    let history = app.session.active().unwrap().history.past_len();
+    down(&mut app, [350.0, 170.0]);
+    up(&mut app, [350.0, 170.0]);
+    assert!(!app.ui.status_error, "an ordinary miss is not a cancellation: {}", app.ui.status);
+    assert_eq!(app.session.active().unwrap().doc, original);
+    assert_eq!(app.session.active().unwrap().history.past_len(), history);
+    assert!(selected_component(&app).is_none());
+}
+
+#[test]
+fn cancelling_or_losing_focus_after_a_miss_keeps_late_release_owned() {
+    for focus_loss in [false, true] {
+        let mut app = app();
+        down(&mut app, [350.0, 170.0]);
+        if focus_loss {
+            reconcile(&mut app, false);
+        } else {
+            cancel(&mut app);
+        }
+        assert!(finish(&mut app, [350.0, 170.0], [350.0, 170.0]).unwrap().is_err());
+        assert!(!owns_drag(&app));
+    }
+}
+
+#[test]
+fn sampler_only_revisions_preserve_selected_component_and_real_edits_invalidate_it() {
+    let mut app = app();
+    down(&mut app, [140.0, 20.0]);
+    up(&mut app, [140.0, 20.0]);
+    assert_eq!(selected_component(&app), Some(1));
+    let original = work(&app);
+    let history = app.session.active().unwrap().history.past_len();
+    for (id, params) in [
+        ("view.colorSamplers.add", json!({"x":1,"y":2})),
+        ("view.colorSamplers.move", json!({"index":0,"x":3,"y":4})),
+        ("view.colorSamplers.delete", json!({"index":0})),
+        ("view.colorSamplers.clear", json!({})),
+    ] {
+        app.run(id, params).unwrap();
+        assert_eq!(selected_component(&app), Some(1), "{id} must not invalidate unchanged Work Path geometry");
+        assert_eq!(work(&app), original);
+        assert_eq!(app.session.active().unwrap().history.past_len(), history);
+    }
+    app.run("path.set", json!({"path":photocraft_engine::vector_cmds::path_json(&original)})).unwrap();
+    assert!(selected_component(&app).is_none(), "a real path command still invalidates even identical geometry");
+}
+
+#[test]
+fn sampler_revision_refresh_does_not_resurrect_an_already_stale_selection() {
+    let mut app = app();
+    down(&mut app, [140.0, 20.0]);
+    up(&mut app, [140.0, 20.0]);
+    app.session.active_mut().unwrap().revision += 1;
+    app.run("view.colorSamplers.clear", json!({})).unwrap();
+    assert!(selected_component(&app).is_none());
+}
