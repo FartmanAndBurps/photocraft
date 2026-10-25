@@ -280,3 +280,32 @@ fn shape_and_explicit_saved_contexts_do_not_inherit_a_component_selector() {
     cancel(&mut app);
     assert_eq!(work(&app), before);
 }
+
+#[test]
+fn direct_run_refuses_component_advanced_commands_before_any_mutation() {
+    for id in
+        ["edit.transform.skew", "edit.transform.distort", "edit.transform.perspective", "edit.transform.warp", "edit.freeTransformCopy", "edit.transform.again"]
+    {
+        let mut app = app();
+        let original = app.session.active().unwrap().doc.clone();
+        let history = app.session.active().unwrap().history.past_len();
+        let result = app.run(id, json!({}));
+        assert_eq!(result.unwrap_err(), COMPONENT_AFFINE_ONLY, "{id}");
+        assert_eq!(app.session.active().unwrap().doc, original);
+        assert_eq!(app.session.active().unwrap().history.past_len(), history);
+        assert!(app.ui.transform.is_none());
+    }
+}
+
+#[test]
+fn component_transform_after_sampler_change_uses_current_revision() {
+    let mut app = app();
+    let original = work(&app);
+    app.run("view.colorSamplers.add", json!({"x":2,"y":3})).unwrap();
+    app.run("path.transform", json!({"translateX":6.25,"translateY":3.5})).unwrap();
+    let moved = work(&app);
+    assert_eq!(moved.subpaths[0], original.subpaths[0]);
+    assert_ne!(moved.subpaths[1], original.subpaths[1]);
+    assert_eq!(moved.subpaths[2], original.subpaths[2]);
+    assert_eq!(crate::work_path_drag::selected_component(&app), Some(1));
+}
