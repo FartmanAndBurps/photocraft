@@ -30,6 +30,9 @@ fn work_target(app: &PhotocraftApp) -> bool {
     if app.ui.selected_path.as_deref().is_some_and(|name| name != "work") {
         return false;
     }
+    if crate::vector_ui::shape_work_path_selected(app) {
+        return true;
+    }
     if let Some(layer) = st.active_layer.and_then(|id| st.doc.layer(id)) {
         if matches!(layer.content, LayerContent::Shape(_)) {
             return false;

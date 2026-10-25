@@ -1294,6 +1294,9 @@ impl PhotocraftApp {
             self.sync_mask_targets();
         }
         if result.is_ok() {
+            if id == "layer.select" || id.starts_with("channel.target") || id == "path.delete" {
+                self.ui.shape_work_path_target = None;
+            }
             work_path_drag::after_command(self, id);
         }
         result

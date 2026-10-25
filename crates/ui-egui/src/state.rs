@@ -705,6 +705,9 @@ pub struct ToolOptions {
     pub enhance_edge: bool,
     /// Pen: "path" (work path) or "shape" (shape layer).
     pub vector_mode: String,
+    /// Rectangle/Ellipse creation mode; independent of the Pen's mode.
+    #[serde(default = "default_shape_mode")]
+    pub shape_mode: String,
     /// Shape tools: fill with the foreground colour, stroke width (0 = none), rectangle corner
     /// radius, polygon sides, line weight.
     pub shape_fill: bool,
@@ -861,6 +864,10 @@ fn default_move_target() -> String {
     "group".into()
 }
 
+fn default_shape_mode() -> String {
+    "shape".into()
+}
+
 fn default_curve_fit() -> f32 {
     2.0
 }
@@ -999,6 +1006,7 @@ impl Default for ToolOptions {
             finger_painting: false,
             enhance_edge: false,
             vector_mode: "path".into(),
+            shape_mode: default_shape_mode(),
             shape_fill: true,
             stroke_width: 0.0,
             shape_stroke: Default::default(),
@@ -1474,6 +1482,9 @@ pub struct UiState {
     /// Selected row in the Paths panel ("work" or a saved path name).
     #[serde(default)]
     pub selected_path: Option<String>,
+    /// Explicit Work Path created by a shape; document id and prior active layer.
+    #[serde(skip)]
+    pub shape_work_path_target: Option<(u64, Option<u64>)>,
     /// Whole-Work-Path drag preview is never persisted into preferences or documents.
     #[serde(skip)]
     pub work_path_drag: crate::work_path_drag::State,
@@ -1680,6 +1691,7 @@ impl Default for UiState {
             direct_selection: Default::default(),
             corner_radius: None,
             selected_path: None,
+            shape_work_path_target: None,
             work_path_drag: Default::default(),
             panels: Panels::default(),
             views: Vec::new(),
