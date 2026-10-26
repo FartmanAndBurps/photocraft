@@ -32,9 +32,19 @@ fn shape_is_default_and_pen_mode_reset_and_serialization_are_independent() {
     assert_eq!(app.ui.tool_options.shape_mode, "shape");
     app.ui.tool_options.vector_mode = "shape".into();
     app.ui.tool_options.shape_mode = "path".into();
-    crate::tool_reset::reset_options(&mut app.ui.tool_options, Tool::Rectangle);
-    assert_eq!(app.ui.tool_options.shape_mode, "shape");
-    assert_eq!(app.ui.tool_options.vector_mode, "shape");
+    for tool in [Tool::Rectangle, Tool::EllipseShape] {
+        app.ui.tool_options.shape_mode = "path".into();
+        crate::tool_reset::reset_options(&mut app.ui.tool_options, tool);
+        assert_eq!(app.ui.tool_options.shape_mode, "shape");
+        assert_eq!(app.ui.tool_options.vector_mode, "shape");
+    }
+    for tool in [Tool::Pen, Tool::CurvaturePen, Tool::FreeformPen] {
+        app.ui.tool_options.shape_mode = "path".into();
+        app.ui.tool_options.vector_mode = "shape".into();
+        crate::tool_reset::reset_options(&mut app.ui.tool_options, tool);
+        assert_eq!(app.ui.tool_options.vector_mode, "path");
+        assert_eq!(app.ui.tool_options.shape_mode, "path");
+    }
     app.ui.tool_options.shape_mode = "path".into();
     let encoded = serde_json::to_value(&app.ui.tool_options).unwrap();
     let decoded: ToolOptions = serde_json::from_value(encoded.clone()).unwrap();
