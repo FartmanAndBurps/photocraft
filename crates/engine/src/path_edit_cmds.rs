@@ -123,9 +123,20 @@ fn add_anchor(s: &mut Session, p: &Value) -> Result<Value> {
         Some(v) => v.as_f64().filter(|t| *t > 0.0 && *t < 1.0).ok_or_else(|| bad(CMD, "`t` must be strictly between 0 and 1"))?,
         None => 0.5,
     };
+    let smooth = match p.get("smooth") {
+        None => false,
+        Some(Value::Bool(v)) => *v,
+        Some(_) => return Err(bad(CMD, "`smooth` must be a boolean")),
+    };
     let mut added = None;
     let mut r = edit_path(s, CMD, p, "Add Anchor Point", |path| {
-        added = Some(edit::add_anchor(path, k, t)?);
+        let at = edit::add_anchor(path, k, t)?;
+        if smooth {
+            let knot = path.subpaths.get_mut(at[0]).and_then(|sp| sp.knots.get_mut(at[1])).ok_or("inserted anchor missing")?;
+            // Classification only: preserve split controls and geometry until a Curvature drag.
+            knot.smooth = true;
+        }
+        added = Some(at);
         Ok(())
     })?;
     if let (Some(o), Some([sp, kn])) = (r.as_object_mut(), added) {
@@ -183,7 +194,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec(
             "path.addAnchor",
             "Add Anchor Point",
-            r#""subpath":i,"knot":j (the segment leaving it),"t":0<t<1=0.5 (where on the segment) (a curve is split there without changing its shape and gets a smooth anchor; a straight segment gets a corner) (the result also has anchor:{subpath,knot})"#.into(),
+            r#""subpath":i,"knot":j (the segment leaving it),"t":0<t<1=0.5 (where on the segment) (a curve is split there without changing its shape and gets a smooth anchor; a straight segment gets a corner unless `smooth`:bool=false requests a smooth knot with unchanged controls) (the result also has anchor:{subpath,knot})"#.into(),
             add_anchor,
         ),
         spec(
@@ -432,5 +443,37 @@ mod tests {
             assert!(s.execute(id, p.clone()).is_err(), "{id} {p}");
         }
         assert_eq!(s.active().unwrap().history.entries().len(), steps);
+    }
+    #[test]
+    fn optional_smooth_insertion_changes_classification_only_and_roundtrips() {
+        for smooth in [false, true] {
+            let mut s = session();
+            s.execute("path.set", json!({"path":{"subpaths":[{"closed":false,"knots":[[10,20],[110,20]]}]}})).unwrap();
+            let before = work(&s);
+            s.execute("path.addAnchor", json!({"subpath":0,"knot":0,"t":0.5,"smooth":smooth})).unwrap();
+            let after = work(&s);
+            let knot = after.subpaths[0].knots[1];
+            assert_eq!(knot.smooth, smooth);
+            assert_eq!(knot.anchor, knot.in_ctrl);
+            assert_eq!(knot.anchor, knot.out_ctrl);
+            assert_eq!(after.subpaths[0].knots[0], before.subpaths[0].knots[0]);
+            assert_eq!(after.subpaths[0].knots[2], before.subpaths[0].knots[1]);
+            assert!(s.undo());
+            assert_eq!(work(&s), before);
+            assert!(s.redo());
+            assert_eq!(work(&s), after);
+        }
+    }
+    #[test]
+    fn invalid_smooth_flag_does_not_insert_or_change_history() {
+        let mut s = session();
+        s.execute("path.set", json!({"path":square()})).unwrap();
+        let before = work(&s);
+        let n = s.active().unwrap().history.past_len();
+        for smooth in [json!(1), json!("true"), json!(null), json!([])] {
+            assert!(s.execute("path.addAnchor", json!({"subpath":0,"knot":0,"t":0.5,"smooth":smooth})).is_err());
+            assert_eq!(work(&s), before);
+            assert_eq!(s.active().unwrap().history.past_len(), n);
+        }
     }
 }

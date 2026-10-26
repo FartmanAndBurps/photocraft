@@ -903,3 +903,22 @@ fn curvature_pen_ordinary_open_anchor_undo_keeps_existing_smoothing_and_document
     assert!(h.state().session.active().unwrap().doc.work_path.is_none());
     assert!(!h.state().session.active().unwrap().history.can_redo(), "ordinary open-path behaviour is retained");
 }
+
+#[test]
+fn curvature_draft_segment_finish_insert_uses_canvas_and_keyboard_history() {
+    let mut h = harness();
+    h.state_mut().ui.tool = Tool::CurvaturePen;
+    h.state_mut().ui.tool_options.vector_mode = "path".into();
+    click(&mut h, [40.0, 100.0]);
+    click(&mut h, [160.0, 100.0]);
+    assert!(h.state().ui.pen.is_some());
+    click(&mut h, [100.0, 100.0]);
+    assert!(h.state().ui.pen.is_none());
+    let path = |h: &Harness<'static, PhotocraftApp>| h.state().session.active().unwrap().doc.work_path.clone().unwrap();
+    let inserted = path(&h);
+    assert_eq!(inserted.subpaths[0].knots.len(), 3);
+    history_key(&mut h, false);
+    assert_eq!(path(&h).subpaths[0].knots.len(), 2);
+    history_key(&mut h, true);
+    assert_eq!(path(&h), inserted);
+}

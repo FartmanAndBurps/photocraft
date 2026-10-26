@@ -517,3 +517,269 @@ fn a_curvature_pen_double_click_through_the_canvas_rounds_a_corner() {
     assert!(k.smooth && k.in_ctrl != k.anchor, "the double-clicked corner is smooth: {k:?}");
     assert!(h.state().ui.pen.is_none(), "and no path was started");
 }
+
+fn insertion_draft() -> PhotocraftApp {
+    let mut a = app(Tool::CurvaturePen);
+    a.ui.tool_options.vector_mode = "path".into();
+    click(&mut a, [40.0, 100.0], Modifiers::NONE);
+    click(&mut a, [160.0, 100.0], Modifiers::NONE);
+    a
+}
+#[test]
+fn curvature_finish_insert_draft_segment_click_finishes_and_preserves_line() {
+    let mut a = insertion_draft();
+    click(&mut a, [100.0, 102.0], Modifiers::NONE);
+    assert!(a.ui.pen.is_none(), "segment click must finish the draft/tail");
+    let p = work(&a);
+    let k = &p.subpaths[0].knots;
+    assert_eq!(k.len(), 3);
+    assert_eq!(k[0].anchor, Point::new(40.0, 100.0));
+    assert_eq!(k[2].anchor, Point::new(160.0, 100.0));
+    assert!((k[1].anchor.x - 100.0).abs() < 0.3 && (k[1].anchor.y - 100.0).abs() < 1e-9);
+    for seg in p.subpaths[0].segments() {
+        for i in 0..=100 {
+            assert!((photocraft_vector::edit::eval(&seg, i as f64 / 100.0).y - 100.0).abs() < 1e-9);
+        }
+    }
+}
+#[test]
+fn curvature_finish_insert_dragged_straight_insertion_becomes_smooth() {
+    let mut a = insertion_draft();
+    crate::vector_ui::pen_commit(&mut a, false);
+    click(&mut a, [100.0, 100.0], Modifiers::NONE);
+    drag(&mut a, [100.0, 100.0], [100.0, 40.0], Modifiers::NONE);
+    let p = work(&a);
+    let k = &p.subpaths[0].knots[1];
+    assert!(k.smooth, "Curvature dragging must round a newly inserted straight-segment knot");
+    assert!(k.in_ctrl != k.anchor && k.out_ctrl != k.anchor);
+    assert_eq!(p.subpaths[0].knots[0].anchor, Point::new(40.0, 100.0));
+    assert_eq!(p.subpaths[0].knots[2].anchor, Point::new(160.0, 100.0));
+}
+
+#[test]
+fn curvature_finish_insert_history_is_finish_then_insertion_and_branches() {
+    let mut a = insertion_draft();
+    let n = a.session.active().unwrap().history.past_len();
+    click(&mut a, [100.0, 100.0], Modifiers::NONE);
+    let inserted = work(&a);
+    assert_eq!(a.session.active().unwrap().history.past_len(), n + 2);
+    a.run("edit.undo", json!({})).unwrap();
+    let finished = work(&a);
+    assert_eq!(finished.subpaths[0].knots.len(), 2);
+    assert!(a.ui.pen.is_none());
+    a.run("edit.undo", json!({})).unwrap();
+    assert!(a.session.active().unwrap().doc.work_path.is_none());
+    a.run("edit.redo", json!({})).unwrap();
+    assert_eq!(work(&a), finished);
+    a.run("edit.redo", json!({})).unwrap();
+    assert_eq!(work(&a), inserted);
+    a.run("edit.undo", json!({})).unwrap();
+    click(&mut a, [80.0, 100.0], Modifiers::NONE);
+    let branch = work(&a);
+    assert!((branch.subpaths[0].knots[1].anchor.x - 80.0).abs() < 0.3);
+    assert!(a.run("edit.redo", json!({})).is_err());
+    assert_eq!(work(&a), branch);
+}
+
+#[test]
+fn curvature_finish_insert_same_gesture_drag_has_matching_preview_and_rounded_symmetry() {
+    let mut a = insertion_draft();
+    let n = a.session.active().unwrap().history.past_len();
+    tool_event(&mut a, ToolEvent::Down { x: 100.0, y: 100.0, pressure: 1.0 }, Modifiers::NONE);
+    tool_event(&mut a, ToolEvent::Move { x: 100.0, y: 40.0, pressure: 1.0 }, Modifiers::NONE);
+    let Some(Drag::Edit { preview: Some(shown), .. }) = a.ui.direct_selection.drag.clone() else { panic!("missing preview") };
+    tool_event(&mut a, ToolEvent::Up { x: 100.0, y: 40.0 }, Modifiers::NONE);
+    assert_eq!(work(&a), shown);
+    assert_eq!(a.session.active().unwrap().history.past_len(), n + 2);
+    let p = work(&a);
+    let k = &p.subpaths[0].knots[1];
+    assert!(k.smooth && k.in_ctrl.x < k.anchor.x && k.out_ctrl.x > k.anchor.x);
+    assert_eq!(k.in_ctrl.y, k.anchor.y);
+    assert_eq!(k.out_ctrl.y, k.anchor.y);
+    let seg = p.subpaths[0].segments();
+    for i in 0..=100 {
+        let t = i as f64 / 100.0;
+        let l = photocraft_vector::edit::eval(&seg[0], t);
+        let r = photocraft_vector::edit::eval(&seg[1], 1.0 - t);
+        assert!((l.x + r.x - 200.0).abs() < 1e-9 && (l.y - r.y).abs() < 1e-9);
+    }
+    a.run("edit.undo", json!({})).unwrap();
+    assert_eq!(work(&a).subpaths[0].knots.len(), 2);
+    a.run("edit.redo", json!({})).unwrap();
+    assert_eq!(work(&a), shown);
+    if let Some(dir) = std::env::var_os("PHOTOCRAFT_CURVATURE_INSERT_SNAPSHOT_DIR") {
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(600.0, 400.0)).build_ui_state(
+            |ui, a: &mut PhotocraftApp| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let xf = crate::canvas::ViewXform { rect: ui.max_rect(), zoom: 2.0, center: [100.0, 80.0], flip: false, rotation: 0.0, aspect: 1.0 };
+                    crate::vector_ui::draw_overlay(a, ui.painter(), &xf, &a.session.active().unwrap().doc);
+                });
+            },
+            a,
+        );
+        PhotocraftApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+        h.run_steps(3);
+        h.render().unwrap().save(std::path::PathBuf::from(dir).join("rounded-midpoint.png")).unwrap();
+    }
+}
+
+#[test]
+fn curvature_finish_insert_draft_misses_anchor_priority_and_short_segments() {
+    let mut a = insertion_draft();
+    click(&mut a, [180.0, 150.0], Modifiers::NONE);
+    assert_eq!(a.ui.pen.as_ref().unwrap().knots.iter().map(|k| k[0]).collect::<Vec<_>>(), vec![[40.0, 100.0], [160.0, 100.0], [180.0, 150.0]]);
+    let mut a = insertion_draft();
+    click(&mut a, [41.0, 100.0], Modifiers::NONE);
+    assert_eq!(a.ui.pen.as_ref().unwrap().knots.len(), 2);
+    assert!(a.session.active().unwrap().doc.work_path.is_none());
+    let mut a = app(Tool::CurvaturePen);
+    a.ui.tool_options.vector_mode = "path".into();
+    click(&mut a, [40.0, 100.0], Modifiers::NONE);
+    click(&mut a, [48.0, 100.0], Modifiers::NONE);
+    click(&mut a, [44.0, 100.0], Modifiers::NONE);
+    assert!(a.ui.pen.is_some());
+    assert!(a.session.active().unwrap().doc.work_path.is_none());
+}
+
+#[test]
+fn curvature_finish_insert_curved_draft_preserves_cubic_and_other_work_geometry() {
+    let mut a = insertion_draft();
+    click(&mut a, [160.0, 160.0], Modifiers::NONE);
+    let before = crate::vector_ui::pen_path(a.ui.pen.as_ref().unwrap());
+    let seg = before.subpaths[0].segments()[0];
+    let p = photocraft_vector::edit::eval(&seg, 0.5);
+    click(&mut a, [p.x, p.y], Modifiers::NONE);
+    assert!(a.ui.pen.is_none());
+    let after = work(&a);
+    assert_eq!(after.subpaths[0].knots.len(), 4);
+    let split = after.subpaths[0].segments();
+    // Canvas snapping and approximate hit projection may choose t slightly different from 0.5.
+    // Recover that parameter from de Casteljau's first control and test the full curve locus.
+    let d = [seg[1].x - seg[0].x, seg[1].y - seg[0].y];
+    let c = split[0][1];
+    let at = ((c.x - seg[0].x) * d[0] + (c.y - seg[0].y) * d[1]) / (d[0] * d[0] + d[1] * d[1]);
+    assert!(at > 0.0 && at < 1.0);
+    for i in 0..=100 {
+        let t = i as f64 / 100.0;
+        let old = photocraft_vector::edit::eval(&seg, t);
+        let new = if t <= at { photocraft_vector::edit::eval(&split[0], t / at) } else { photocraft_vector::edit::eval(&split[1], (t - at) / (1.0 - at)) };
+        assert!((old.x - new.x).hypot(old.y - new.y) < 1e-8);
+    }
+    assert_eq!(split[2], before.subpaths[0].segments()[1]);
+}
+
+#[test]
+fn curvature_finish_insert_uses_new_work_subpath_even_with_overlapping_shape() {
+    let mut a = app(Tool::CurvaturePen);
+    a.ui.tool_options.vector_mode = "path".into();
+    a.run("path.set", json!({"path":{"subpaths":[{"knots":[[40,100],[160,100]]}]}})).unwrap();
+    a.ui.selected_path = Some("work".into());
+    // Drawing away from the existing line, then move the draft to overlap before the test click.
+    crate::vector_ui::curvature_down(&mut a, 40.0, 100.0);
+    crate::vector_ui::curvature_up(&mut a);
+    crate::vector_ui::curvature_down(&mut a, 160.0, 100.0);
+    crate::vector_ui::curvature_up(&mut a);
+    a.run("shape.create", json!({"kind":"rect","rect":[30,100,140,40]})).unwrap();
+    let old = work(&a).subpaths[0].clone();
+    let layers = a.session.active().unwrap().doc.layers.clone();
+    click(&mut a, [100.0, 100.0], Modifiers::NONE);
+    let p = work(&a);
+    assert_eq!(p.subpaths.len(), 2);
+    assert_eq!(p.subpaths[0], old);
+    assert_eq!(p.subpaths[1].knots.len(), 3);
+    assert!(crate::work_path_drag::selected_work(&a));
+    drag(&mut a, [100.0, 100.0], [100.0, 60.0], Modifiers::NONE);
+    assert_eq!(work(&a).subpaths[0], old);
+    assert_eq!(work(&a).subpaths[1].knots[1].anchor.y, 60.0);
+    assert_eq!(a.session.active().unwrap().doc.layers, layers);
+}
+
+#[test]
+fn curvature_finish_insert_shape_and_mask_targets_are_exact() {
+    for shape in [true, false] {
+        let mut a = insertion_draft();
+        if shape {
+            a.ui.tool_options.vector_mode = "shape".into();
+        } else {
+            a.run("layer.vectorMask.revealAll", json!({})).unwrap();
+            a.ui.vector_mask_target = true;
+        }
+        let mask_before = (!shape).then(|| crate::vector_ui::targeted_vector_mask(&a).unwrap().1);
+        click(&mut a, [100.0, 100.0], Modifiers::NONE);
+        assert!(a.ui.pen.is_none());
+        let p = if shape { crate::vector_ui::active_shape_path(&a).unwrap().1 } else { crate::vector_ui::targeted_vector_mask(&a).unwrap().1 };
+        assert_eq!(p.subpaths.last().unwrap().knots.len(), 3);
+        assert!(a.session.active().unwrap().doc.work_path.is_none());
+        if let Some(old) = mask_before {
+            assert_eq!(&p.subpaths[..old.subpaths.len()], old.subpaths.as_slice());
+        }
+        let closed = p.subpaths.last().unwrap().closed;
+        assert!(!closed);
+        a.run("edit.undo", json!({})).unwrap();
+        let p = if shape { crate::vector_ui::active_shape_path(&a).unwrap().1 } else { crate::vector_ui::targeted_vector_mask(&a).unwrap().1 };
+        assert_eq!(p.subpaths.last().unwrap().knots.len(), 2);
+    }
+}
+
+#[test]
+fn curvature_finish_insert_denied_finish_preserves_draft_and_denied_insert_keeps_finished_path() {
+    for deny in ["path.set", "path.addAnchor"] {
+        let mut a = insertion_draft();
+        let draft = a.ui.pen.clone().unwrap();
+        let n = a.session.active().unwrap().history.past_len();
+        a.session.authorize = Some(if deny == "path.set" {
+            |id, _| if id == "path.set" { Err(photocraft_engine::EngineError::Other("denied finish".into())) } else { Ok(()) }
+        } else {
+            |id, _| if id == "path.addAnchor" { Err(photocraft_engine::EngineError::Other("denied insert".into())) } else { Ok(()) }
+        });
+        click(&mut a, [100.0, 100.0], Modifiers::NONE);
+        if deny == "path.set" {
+            assert_eq!(a.ui.pen.as_ref().unwrap(), &draft);
+            assert_eq!(a.session.active().unwrap().history.past_len(), n);
+        } else {
+            assert!(a.ui.pen.is_none());
+            assert_eq!(work(&a).subpaths[0].knots.len(), 2);
+            assert_eq!(a.session.active().unwrap().history.past_len(), n + 1);
+        }
+    }
+}
+
+#[test]
+fn curvature_finish_insert_dedicated_and_direct_selection_corners_are_unchanged() {
+    let mut a = insertion_draft();
+    crate::vector_ui::pen_commit(&mut a, false);
+    a.ui.tool = Tool::AddAnchorPoint;
+    click(&mut a, [100.0, 100.0], Modifiers::NONE);
+    assert!(!work(&a).subpaths[0].knots[1].smooth);
+    a.ui.tool = Tool::DirectSelection;
+    drag(&mut a, [100.0, 100.0], [100.0, 40.0], Modifiers::NONE);
+    let k = work(&a).subpaths[0].knots[1];
+    assert!(!k.smooth && k.in_ctrl == k.anchor && k.out_ctrl == k.anchor);
+    // A deliberate pre-existing corner still stays a corner when dragged with Curvature Pen.
+    a.ui.tool = Tool::CurvaturePen;
+    drag(&mut a, [100.0, 40.0], [100.0, 60.0], Modifiers::NONE);
+    assert!(!work(&a).subpaths[0].knots[1].smooth);
+}
+
+#[test]
+fn curvature_finish_insert_closed_path_click_preserves_closure_and_curvature_drag() {
+    let mut a = app(Tool::CurvaturePen);
+    with_corner_square(&mut a);
+    let before = work(&a);
+    click(&mut a, [40.0, 100.0], Modifiers::NONE);
+    let split = work(&a);
+    assert!(split.subpaths[0].closed);
+    assert_eq!(split.subpaths[0].knots.len(), 5);
+    let k = split.subpaths[0].knots.last().unwrap();
+    assert!(k.smooth && k.anchor.x == 40.0);
+    drag(&mut a, [40.0, 100.0], [20.0, 100.0], Modifiers::NONE);
+    let moved = work(&a);
+    assert!(moved.subpaths[0].closed && moved.subpaths[0].knots.last().unwrap().smooth);
+    a.run("edit.undo", json!({})).unwrap();
+    assert_eq!(work(&a), split);
+    a.run("edit.undo", json!({})).unwrap();
+    assert_eq!(work(&a), before);
+    a.run("edit.redo", json!({})).unwrap();
+    a.run("edit.redo", json!({})).unwrap();
+    assert_eq!(work(&a), moved);
+}

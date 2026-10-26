@@ -229,6 +229,9 @@ pub fn pointer(app: &mut PhotocraftApp, ev: ToolEvent, mods: Modifiers) -> bool 
     let tool = app.ui.tool;
     match ev {
         ToolEvent::Down { x, y, .. } => {
+            if tool == Tool::CurvaturePen && !mods.command && finish_curvature_segment(app, [x, y]) {
+                return true;
+            }
             if curvature_idle(app, mods) {
                 return curvature_press(app, [x, y]);
             }
@@ -399,19 +402,58 @@ pub(crate) fn curvature_toggle_active(app: &mut PhotocraftApp, p: [f64; 2]) {
     app.ui.direct_selection = DirectSelection { target: Some(target), anchors: vec![[s, k]], ..Default::default() };
 }
 
+/// A segment of the active Curvature draft finishes it before this same press edits it.
+/// Anchor hits keep their existing closure/grab priority; misses continue normal drawing.
+fn finish_curvature_segment(app: &mut PhotocraftApp, p: [f64; 2]) -> bool {
+    let Some(pen) = app.ui.pen.as_ref().filter(|p| p.curvature && p.moving.is_none() && p.knots.len() >= 2) else { return false };
+    // Saved named paths do not yet have a point-tool target. Do not commit and retarget Work.
+    if app.ui.tool_options.vector_mode != "shape"
+        && (pen.resumes.as_ref().is_some_and(|r| r.path != "work")
+            || (crate::vector_ui::targeted_vector_mask(app).is_none() && app.ui.selected_path.as_deref().is_some_and(|n| !matches!(n, "work" | "layer"))))
+    {
+        return false;
+    }
+    let path = crate::vector_ui::pen_path(pen);
+    let tol = 6.0 / f64::from(app.point_zoom().max(0.01));
+    let Some(Hit::Segment([_, knot], t)) = edit::hit(&path, Point::new(p[0], p[1]), tol, &[]) else { return false };
+    if !crate::vector_ui::cancel_stale(app) {
+        return true;
+    }
+    let draft = app.ui.pen.clone();
+    let owner = app.ui.pen_doc;
+    let revision = app.session.active().map(|st| (st.doc.id, st.revision));
+    let Some((target, subpath)) = crate::vector_ui::pen_commit_target(app, false) else {
+        // Failed finalisation must not lose the draft or start a different path.
+        if app.session.active().map(|st| (st.doc.id, st.revision)) == revision {
+            app.ui.pen = draft;
+            app.ui.pen_doc = owner;
+        }
+        return true;
+    };
+    if target == PathRef::Work {
+        crate::work_path_drag::select_whole(app);
+    }
+    let Some((_, committed)) = candidates(app).into_iter().find(|(r, _)| *r == target) else { return true };
+    curvature_press_on(app, p, target, committed, Hit::Segment([subpath, knot], t))
+}
+
 /// Curvature Pen press with no path being drawn, on the active path: an anchor is grabbed and
 /// dragged; a segment gets a new anchor there (`path.addAnchor`), dragged the same way. Either
 /// way the curve reflows smoothly through the moved anchor, as in Photoshop (`path.moveAnchors`
 /// with `curvature` on release), and an added anchor and its drag are one history step. False
 /// when the press hits neither, so it starts a new path.
 fn curvature_press(app: &mut PhotocraftApp, p: [f64; 2]) -> bool {
-    let Some((target, mut base, hit)) = curvature_target(app, p) else { return false };
+    let Some((target, base, hit)) = curvature_target(app, p) else { return false };
+    curvature_press_on(app, p, target, base, hit)
+}
+
+fn curvature_press_on(app: &mut PhotocraftApp, p: [f64; 2], target: PathRef, mut base: Path, hit: Hit) -> bool {
     let mut coalesce = None;
     let k = match hit {
         Hit::Anchor(k) => k,
         Hit::Segment([s, k], t) => {
             let key = format!("curvature-add-{}", app.ui.alloc_id());
-            let mut params = json!({"subpath": s, "knot": k, "t": t.clamp(0.01, 0.99), "coalesce": key});
+            let mut params = json!({"subpath": s, "knot": k, "t": t, "smooth": true, "coalesce": key});
             if let (Some(o), Some(tp)) = (params.as_object_mut(), target.params().as_object()) {
                 o.extend(tp.clone());
             }
