@@ -64,7 +64,7 @@ fn dragging_an_anchor_moves_it_in_one_undoable_step() {
     assert_eq!(anchor(&app, 3), Point::new(50.0, 130.0));
     assert_eq!(anchor(&app, 0), Point::new(40.0, 40.0), "only the dragged anchor moved");
     assert_eq!(steps(&app), n + 1, "one history step for the whole drag");
-    assert_eq!((app.ui.direct_selection.target, app.ui.direct_selection.anchors.clone()), (Some(PathRef::Work), vec![[0, 3]]));
+    assert_eq!((app.ui.direct_selection.target.clone(), app.ui.direct_selection.anchors.clone()), (Some(PathRef::Work), vec![[0, 3]]));
     assert!(app.session.undo());
     assert_eq!(work(&app), before);
 }
@@ -160,7 +160,7 @@ fn pen_with_command_edits_the_path_being_drawn_in_place() {
     let wp = work(&app);
     assert_eq!(wp.subpaths[0].knots.len(), 3);
     assert_eq!(wp.subpaths[0].knots[1].anchor, Point::new(90.0, 70.0));
-    assert_eq!(app.ui.direct_selection.target, None, "the Pen selection is gone with the Pen path");
+    assert_eq!(app.ui.direct_selection.target.clone(), None, "the Pen selection is gone with the Pen path");
 }
 
 /// ⌘/Ctrl-click selects an anchor of the path being drawn, showing its handles; ⌘-dragging one
@@ -172,7 +172,7 @@ fn pen_with_command_turns_a_handle_of_the_path_being_drawn() {
     drag(&mut app, [90.0, 30.0], [110.0, 30.0], Modifiers::NONE);
     assert_eq!(app.ui.pen.as_ref().unwrap().knots[1], [[90.0, 30.0], [70.0, 30.0], [110.0, 30.0]]);
     click(&mut app, [90.0, 30.0], Modifiers::COMMAND);
-    assert_eq!(app.ui.direct_selection.target, Some(PathRef::Pen));
+    assert_eq!(app.ui.direct_selection.target.clone(), Some(PathRef::Pen));
     assert_eq!(app.ui.direct_selection.anchors, vec![[0, 1]]);
     drag(&mut app, [110.0, 30.0], [110.0, 50.0], Modifiers::COMMAND);
     let k = app.ui.pen.as_ref().expect("still drawing").knots[1];
@@ -219,7 +219,7 @@ fn shape_layer_paths_are_edited_too() {
     let mut app = app(Tool::DirectSelection);
     let id = app.run("shape.create", json!({"kind": "rect", "rect": [20, 20, 60, 60], "fill": "#3070c0"})).unwrap()["layer"].as_u64().unwrap();
     drag(&mut app, [80.0, 80.0], [100.0, 90.0], Modifiers::NONE);
-    assert_eq!(app.ui.direct_selection.target, Some(PathRef::Layer(id)));
+    assert_eq!(app.ui.direct_selection.target.clone(), Some(PathRef::Layer(id)));
     let info = app.run("shape.info", json!({"layer": id})).unwrap();
     assert_eq!(info["path"]["subpaths"][0]["knots"][2]["anchor"], json!([100.0, 90.0]));
     let b: [i64; 4] = serde_json::from_value(info["bounds"].clone()).unwrap();
@@ -309,7 +309,7 @@ fn arrow_keys_nudge_the_selected_anchors() {
     // The path stays targeted after a click on empty canvas, but no anchor is selected.
     click(&mut app, [40.0, 120.0], Modifiers::NONE);
     click(&mut app, [80.0, 80.0], Modifiers::NONE);
-    assert_eq!(app.ui.direct_selection.target, Some(PathRef::Work));
+    assert_eq!(app.ui.direct_selection.target.clone(), Some(PathRef::Work));
     let n = steps(&app);
     assert!(!press(&mut app, egui::Key::ArrowRight, Modifiers::NONE), "no anchor selected: not Direct Selection's key");
     assert_eq!(steps(&app), n);
@@ -782,4 +782,285 @@ fn curvature_finish_insert_closed_path_click_preserves_closure_and_curvature_dra
     a.run("edit.redo", json!({})).unwrap();
     a.run("edit.redo", json!({})).unwrap();
     assert_eq!(work(&a), moved);
+}
+
+fn saved_fixture() -> PhotocraftApp {
+    let mut a = app(Tool::CurvaturePen);
+    a.ui.tool_options.vector_mode = "path".into();
+    a.run("path.set", json!({"name":"work","path":{"subpaths":[{"closed":false,"knots":[[20,180],[180,180]]}]}})).unwrap();
+    a.run("path.set", json!({"name":"Path 1","path":{"subpaths":[{"closed":false,"knots":[[40,100],[160,100]]}]}})).unwrap();
+    a.ui.selected_path = Some("Path 1".into());
+    a
+}
+fn saved(a: &PhotocraftApp, name: &str) -> Path {
+    a.session.active().unwrap().doc.paths.iter().find(|p| p.name == name).unwrap().path.clone()
+}
+#[test]
+fn named_target_regression_completed_selected_path_inserts_without_changing_work() {
+    let mut a = saved_fixture();
+    let work_before = work(&a);
+    let before = saved(&a, "Path 1");
+    click(&mut a, [100.0, 100.0], Modifiers::NONE);
+    assert!(a.ui.pen.is_none(), "selected saved path segment must be edited, not start a draft");
+    let after = saved(&a, "Path 1");
+    assert_eq!(after.subpaths[0].knots.len(), 3);
+    assert_eq!(work(&a), work_before);
+    a.run("edit.undo", json!({})).unwrap();
+    assert_eq!(saved(&a, "Path 1"), before);
+    a.run("edit.redo", json!({})).unwrap();
+    assert_eq!(saved(&a, "Path 1"), after);
+}
+#[test]
+fn named_target_regression_draft_finishes_into_selected_saved_path() {
+    let mut a = saved_fixture();
+    let before = saved(&a, "Path 1");
+    let work_before = work(&a);
+    click(&mut a, [40.0, 40.0], Modifiers::NONE);
+    click(&mut a, [160.0, 40.0], Modifiers::NONE);
+    click(&mut a, [100.0, 40.0], Modifiers::NONE);
+    assert!(a.ui.pen.is_none(), "named destination must support the same finish/insert interaction");
+    let after = saved(&a, "Path 1");
+    assert_eq!(after.subpaths.len(), 2);
+    assert_eq!(after.subpaths[0], before.subpaths[0]);
+    assert_eq!(after.subpaths[1].knots.len(), 3);
+    assert_eq!(work(&a), work_before);
+    a.run("edit.undo", json!({})).unwrap();
+    assert_eq!(saved(&a, "Path 1").subpaths[1].knots.len(), 2);
+    a.run("edit.undo", json!({})).unwrap();
+    assert_eq!(saved(&a, "Path 1"), before);
+    a.run("edit.redo", json!({})).unwrap();
+    a.run("edit.redo", json!({})).unwrap();
+    assert_eq!(saved(&a, "Path 1"), after);
+    assert_eq!(work(&a), work_before);
+}
+#[test]
+fn named_target_work_second_subpath_and_original_control() {
+    let mut a = insertion_draft();
+    click(&mut a, [100.0, 100.0], Modifiers::NONE);
+    let first = work(&a).subpaths[0].clone();
+    click(&mut a, [40.0, 160.0], Modifiers::NONE);
+    click(&mut a, [160.0, 160.0], Modifiers::NONE);
+    click(&mut a, [100.0, 160.0], Modifiers::NONE);
+    assert!(a.ui.pen.is_none());
+    let p = work(&a);
+    assert_eq!(p.subpaths.len(), 2);
+    assert_eq!(p.subpaths[0], first);
+    assert_eq!(p.subpaths[1].knots.len(), 3);
+}
+
+#[test]
+fn named_target_switches_only_edit_the_selected_path_and_preserve_names() {
+    let mut a = saved_fixture();
+    a.run("path.set", json!({"name":"Path 2","path":{"subpaths":[{"closed":false,"knots":[[40,60],[160,60]]}]}})).unwrap();
+    let path1 = saved(&a, "Path 1");
+    let work0 = work(&a);
+    a.ui.selected_path = Some("Path 2".into());
+    click(&mut a, [100.0, 60.0], Modifiers::NONE);
+    assert_eq!(saved(&a, "Path 2").subpaths[0].knots.len(), 3);
+    assert_eq!(saved(&a, "Path 1"), path1);
+    assert_eq!(work(&a), work0);
+    let path2 = saved(&a, "Path 2");
+    a.ui.selected_path = Some("work".into());
+    crate::work_path_drag::select_whole(&mut a);
+    click(&mut a, [100.0, 180.0], Modifiers::NONE);
+    assert_eq!(work(&a).subpaths[0].knots.len(), 3);
+    assert_eq!(saved(&a, "Path 1"), path1);
+    assert_eq!(saved(&a, "Path 2"), path2);
+    a.ui.selected_path = Some("Path 1".into());
+    click(&mut a, [100.0, 100.0], Modifiers::NONE);
+    let edited = saved(&a, "Path 1");
+    assert_eq!(edited.subpaths[0].knots.len(), 3);
+    a.run("edit.undo", json!({})).unwrap();
+    assert_eq!(saved(&a, "Path 1"), path1);
+    a.run("edit.redo", json!({})).unwrap();
+    assert_eq!(saved(&a, "Path 1"), edited);
+    assert_eq!(a.session.active().unwrap().doc.paths.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), vec!["Path 1", "Path 2"]);
+}
+#[test]
+fn named_target_add_anchor_direct_selection_and_handles_share_engine_commands() {
+    let mut a = saved_fixture();
+    let work0 = work(&a);
+    a.ui.tool = Tool::AddAnchorPoint;
+    click(&mut a, [100.0, 100.0], Modifiers::NONE);
+    assert_eq!(saved(&a, "Path 1").subpaths[0].knots.len(), 3);
+    a.ui.tool = Tool::DirectSelection;
+    drag(&mut a, [100.0, 100.0], [100.0, 70.0], Modifiers::NONE);
+    assert_eq!(saved(&a, "Path 1").subpaths[0].knots[1].anchor.y, 70.0);
+    assert_eq!(work(&a), work0);
+    // Create handles with the existing Convert Point operation, then drag one normally.
+    a.ui.tool = Tool::ConvertPoint;
+    drag(&mut a, [100.0, 70.0], [120.0, 70.0], Modifiers::NONE);
+    a.ui.tool = Tool::DirectSelection;
+    drag(&mut a, [120.0, 70.0], [125.0, 60.0], Modifiers::NONE);
+    assert_eq!(saved(&a, "Path 1").subpaths[0].knots[1].out_ctrl, Point::new(125.0, 60.0));
+    assert_eq!(work(&a), work0);
+}
+#[test]
+fn named_target_stale_drag_cannot_edit_another_selection_revision_or_document() {
+    for reason in ["selection", "revision", "document", "rename"] {
+        let mut a = saved_fixture();
+        a.ui.tool = Tool::DirectSelection;
+        tool_event(&mut a, ToolEvent::Down { x: 40.0, y: 100.0, pressure: 1.0 }, Modifiers::NONE);
+        tool_event(&mut a, ToolEvent::Move { x: 50.0, y: 90.0, pressure: 1.0 }, Modifiers::NONE);
+        match reason {
+            "selection" => a.ui.selected_path = Some("work".into()),
+            "revision" => {
+                a.run("layer.new.layer", json!({})).unwrap();
+            }
+            "document" => {
+                a.run("file.new", json!({"width":200,"height":200})).unwrap();
+                a.run("path.set", json!({"name":"Path 1","path":{"subpaths":[{"knots":[[40,100],[160,100]]}]}})).unwrap();
+            }
+            "rename" => {
+                a.run("path.rename", json!({"name":"Path 1","to":"Renamed"})).unwrap();
+            }
+            _ => {}
+        }
+        let before = a.session.active().unwrap().doc.clone();
+        let n = a.session.active().unwrap().history.past_len();
+        tool_event(&mut a, ToolEvent::Up { x: 60.0, y: 80.0 }, Modifiers::NONE);
+        assert_eq!(a.session.active().unwrap().doc, before, "{reason}");
+        assert_eq!(a.session.active().unwrap().history.past_len(), n);
+        assert!(a.ui.direct_selection.drag.is_none());
+    }
+}
+#[test]
+fn named_target_missing_does_not_fall_back_to_work_or_finish_a_draft() {
+    let mut a = saved_fixture();
+    let work0 = work(&a);
+    let named0 = saved(&a, "Path 1");
+    a.ui.selected_path = Some("Missing".into());
+    a.ui.tool = Tool::AddAnchorPoint;
+    click(&mut a, [100.0, 180.0], Modifiers::NONE);
+    assert_eq!(work(&a), work0);
+    a.ui.tool = Tool::CurvaturePen;
+    click(&mut a, [40.0, 40.0], Modifiers::NONE);
+    click(&mut a, [160.0, 40.0], Modifiers::NONE);
+    let draft = a.ui.pen.clone();
+    click(&mut a, [100.0, 40.0], Modifiers::NONE);
+    assert_eq!(a.ui.pen, draft);
+    assert_eq!(work(&a), work0);
+    assert_eq!(saved(&a, "Path 1"), named0);
+}
+#[test]
+fn named_target_selected_named_path_overrides_mask_destination_in_path_mode() {
+    let mut a = saved_fixture();
+    a.run("layer.vectorMask.revealAll", json!({})).unwrap();
+    a.ui.vector_mask_target = true;
+    let mask = crate::vector_ui::targeted_vector_mask(&a).unwrap().1;
+    click(&mut a, [40.0, 40.0], Modifiers::NONE);
+    click(&mut a, [160.0, 40.0], Modifiers::NONE);
+    click(&mut a, [100.0, 40.0], Modifiers::NONE);
+    assert!(a.ui.pen.is_none());
+    assert_eq!(saved(&a, "Path 1").subpaths.last().unwrap().knots.len(), 3);
+    assert_eq!(crate::vector_ui::targeted_vector_mask(&a).unwrap().1, mask);
+}
+#[test]
+fn named_target_real_paths_panel_switch_controls_curvature_insertion() {
+    use egui_kittest::{Harness, kittest::Queryable};
+    let mut a = saved_fixture();
+    a.ui.selected_path = Some("work".into());
+    let mut h = Harness::builder().with_size(egui::vec2(320.0, 360.0)).build_ui_state(|ui, a| crate::vector_ui::paths_panel(a, ui), a);
+    PhotocraftApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+    h.run_steps(4);
+    h.get_by_label("Path 1").click();
+    h.run();
+    let a = h.state_mut();
+    assert_eq!(a.ui.selected_path.as_deref(), Some("Path 1"));
+    click(a, [100.0, 100.0], Modifiers::NONE);
+    assert_eq!(saved(a, "Path 1").subpaths[0].knots.len(), 3);
+    h.get_by_label("Work Path").click();
+    h.run();
+    let a = h.state_mut();
+    assert!(crate::work_path_drag::selected_work(a));
+    click(a, [100.0, 180.0], Modifiers::NONE);
+    assert_eq!(work(a).subpaths[0].knots.len(), 3);
+    assert_eq!(saved(a, "Path 1").subpaths[0].knots.len(), 3);
+}
+
+#[test]
+fn named_target_geometry_edits_preserve_existing_path_text_and_path_names() {
+    let mut a = saved_fixture();
+    let id = a.run("type.create", json!({"x":20,"y":30,"text":"Studio","size":16})).unwrap()["layer"].as_u64().unwrap();
+    a.run("type.attachToPath", json!({"layer":id})).unwrap();
+    let layers = a.session.active().unwrap().doc.layers.clone();
+    let work0 = work(&a);
+    click(&mut a, [100.0, 100.0], Modifiers::NONE);
+    drag(&mut a, [100.0, 100.0], [100.0, 60.0], Modifiers::NONE);
+    assert_eq!(a.session.active().unwrap().doc.layers, layers);
+    assert_eq!(work(&a), work0);
+    assert_eq!(a.session.active().unwrap().doc.paths[0].name, "Path 1");
+    a.run("edit.undo", json!({})).unwrap();
+    a.run("edit.redo", json!({})).unwrap();
+    assert_eq!(a.session.active().unwrap().doc.layers, layers);
+}
+#[test]
+fn named_target_overlay_contains_only_selected_named_outline_without_duplicates() {
+    let mut a = saved_fixture();
+    click(&mut a, [100.0, 100.0], Modifiers::NONE);
+    drag(&mut a, [100.0, 100.0], [100.0, 60.0], Modifiers::NONE);
+    let ctx = egui::Context::default();
+    PhotocraftApp::setup_context(&ctx, crate::theme::ThemeKind::ALL[0]);
+    let xf = crate::canvas::ViewXform {
+        rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 400.0)),
+        zoom: 2.0,
+        center: [100.0, 100.0],
+        flip: false,
+        rotation: 0.0,
+        aspect: 1.0,
+    };
+    let mut output = ctx.run_ui(egui::RawInput::default(), |ui| crate::vector_ui::draw_overlay(&a, ui.painter(), &xf, &a.session.active().unwrap().doc));
+    output.textures_delta.clear();
+    assert_eq!(output.shapes.iter().filter(|s| matches!(s.shape, egui::Shape::Path(_))).count(), 1, "no duplicate saved outline or unrelated Work outline");
+    if let Some(dir) = std::env::var_os("PHOTOCRAFT_NAMED_TARGET_SNAPSHOT_DIR") {
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(600.0, 400.0)).build_ui_state(
+            move |ui, a: &mut PhotocraftApp| {
+                egui::CentralPanel::default().show(ui, |ui| crate::vector_ui::draw_overlay(a, ui.painter(), &xf, &a.session.active().unwrap().doc));
+            },
+            a,
+        );
+        PhotocraftApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+        h.run_steps(3);
+        h.render().unwrap().save(std::path::PathBuf::from(dir).join("selected-named-path.png")).unwrap();
+    }
+}
+
+#[test]
+fn named_target_shape_creation_mode_keeps_saved_geometry_and_targets_new_layer() {
+    let mut a = saved_fixture();
+    let before = saved(&a, "Path 1");
+    let work0 = work(&a);
+    a.ui.tool_options.vector_mode = "shape".into();
+    click(&mut a, [40.0, 40.0], Modifiers::NONE);
+    click(&mut a, [160.0, 40.0], Modifiers::NONE);
+    click(&mut a, [100.0, 40.0], Modifiers::NONE);
+    assert!(a.ui.pen.is_none());
+    assert_eq!(a.ui.selected_path.as_deref(), Some("layer"));
+    assert_eq!(crate::vector_ui::active_shape_path(&a).unwrap().1.subpaths[0].knots.len(), 3);
+    assert_eq!(saved(&a, "Path 1"), before);
+    assert_eq!(work(&a), work0);
+}
+
+#[test]
+fn named_target_closed_curvature_undo_preserves_saved_identity_and_other_paths() {
+    let mut a = saved_fixture();
+    let original = saved(&a, "Path 1");
+    let work0 = work(&a);
+    for p in [[40.0, 40.0], [160.0, 40.0], [160.0, 70.0], [40.0, 40.0]] {
+        click(&mut a, p, Modifiers::NONE);
+    }
+    assert!(a.ui.pen.is_none());
+    let closed = saved(&a, "Path 1");
+    assert!(closed.subpaths[1].closed);
+    a.run("edit.undo", json!({})).unwrap();
+    assert_eq!(a.ui.pen.as_ref().unwrap().knots.len(), 3);
+    assert_eq!(saved(&a, "Path 1"), original);
+    a.run("edit.undo", json!({})).unwrap();
+    assert_eq!(a.ui.pen.as_ref().unwrap().knots.len(), 2);
+    a.run("edit.redo", json!({})).unwrap();
+    assert_eq!(a.ui.pen.as_ref().unwrap().knots.len(), 3);
+    a.run("edit.redo", json!({})).unwrap();
+    assert_eq!(saved(&a, "Path 1"), closed);
+    assert_eq!(work(&a), work0);
+    assert_eq!(a.ui.selected_path.as_deref(), Some("Path 1"));
 }

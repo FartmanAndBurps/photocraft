@@ -530,7 +530,7 @@ pub fn pen_commit(app: &mut PhotocraftApp, closed: bool) {
 }
 
 /// The exact committed subpath, for a draft-segment click that continues as an edit.
-/// Named saved paths retain their existing lack of a Direct Selection target.
+/// Includes named paths through their document-qualified point-tool identity.
 pub(crate) fn pen_commit_target(app: &mut PhotocraftApp, closed: bool) -> Option<(crate::direct_select::PathRef, usize)> {
     // The control channel is drained after `sync_views`, so a document switch in this frame has
     // not been seen yet: never commit the path into the document it was not drawn on.
@@ -578,11 +578,11 @@ fn commit_path(app: &mut PhotocraftApp, pen: &PenPath, closed: bool) -> Option<(
         // The resumed subpath, carried on, takes its old place: one step, no second subpath.
         let index = pen.resumes.as_ref().map(|r| r.index);
         app.run("path.set", json!({"name": name, "path": p})).map(|_| {
-            let target = (name == "work").then_some(index).flatten().map(|index| (PathRef::Work, index));
+            let target = index.and_then(|index| PathRef::path(app, &name).map(|r| (r, index)));
             app.ui.selected_path = Some(name);
             target
         })
-    } else if let Some((id, existing)) = targeted_vector_mask(app) {
+    } else if let Some((id, existing)) = targeted_vector_mask(app).filter(|_| selected_saved_path(app).is_none()) {
         // A targeted vector mask takes the new subpath (#196), as in Photoshop.
         let mut p = photocraft_engine::vector_cmds::path_json(&existing);
         if let (Some(subs), Some(new)) = (p.get_mut("subpaths").and_then(Value::as_array_mut), path.get("subpaths").and_then(Value::as_array)) {
@@ -605,7 +605,7 @@ fn commit_path(app: &mut PhotocraftApp, pen: &PenPath, closed: bool) -> Option<(
             params["op"] = json!("combine");
         }
         app.run("path.set", params).map(|_| {
-            let target = (name == "work").then_some((PathRef::Work, index));
+            let target = PathRef::path(app, &name).map(|r| (r, index));
             app.ui.selected_path = Some(name);
             target
         })
@@ -1228,10 +1228,6 @@ pub fn draw_overlay(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform
         // Direct Selection (or the Pen with ⌘/Ctrl held) draws the paths it edits (#790).
         crate::direct_select::draw_overlay(app, painter, &to_scr, accent, paths);
         if paths {
-            // The selected saved path shows too, though Direct Selection doesn't edit it yet.
-            if let Some(p) = selected_saved_path(app) {
-                draw_path(p, true);
-            }
             crate::anchor_tools::draw_hover(app, painter, &to_scr, accent, painter.ctx().input(|i| i.modifiers));
         }
     } else if paths {
@@ -1910,6 +1906,8 @@ pub fn paths_panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                     app.ui.selected_path = Some(key.clone());
                     if *kind == PathRow::Work {
                         crate::work_path_drag::select_whole(app);
+                    } else {
+                        app.ui.direct_selection = Default::default();
                     }
                 }
                 // As in Photoshop, double-clicking a saved path's name renames it, and double-clicking

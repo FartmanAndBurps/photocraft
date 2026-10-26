@@ -140,7 +140,7 @@ fn apply(app: &mut PhotocraftApp, r: PathRef, hit: Hit) {
     }
     match app.run(id, params) {
         // The anchors shift: a Direct Selection on this path would point at the wrong ones.
-        Ok(_) if app.ui.direct_selection.target == Some(r) => app.ui.direct_selection = DirectSelection { target: Some(r), ..Default::default() },
+        Ok(_) if app.ui.direct_selection.target.as_ref() == Some(&r) => app.ui.direct_selection = DirectSelection { target: Some(r), ..Default::default() },
         Ok(_) => {}
         Err(e) => {
             app.ui.status = e;

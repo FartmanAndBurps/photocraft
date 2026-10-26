@@ -33,10 +33,15 @@ use crate::canvas::ToolEvent;
 use crate::state::Tool;
 
 /// A path Direct Selection edits.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PathRef {
     Work,
+    /// A saved path, qualified by document so a switch cannot edit an identically named path.
+    Named {
+        document: u64,
+        name: String,
+    },
     /// A layer's shape path, or its vector mask.
     Layer(u64),
     /// The Pen path being drawn (`ui.pen`): edited in place, not through the engine.
@@ -44,10 +49,27 @@ pub enum PathRef {
 }
 
 impl PathRef {
+    pub(crate) fn path(app: &PhotocraftApp, name: &str) -> Option<Self> {
+        if name == "work" {
+            return Some(Self::Work);
+        }
+        let st = app.session.active()?;
+        st.doc.paths.iter().any(|p| p.name == name).then(|| Self::Named { document: st.doc.id.0, name: name.to_owned() })
+    }
+    fn valid(&self, app: &PhotocraftApp) -> bool {
+        match self {
+            Self::Named { document, name } => {
+                app.ui.selected_path.as_deref() == Some(name.as_str())
+                    && app.session.active().is_some_and(|st| st.doc.id.0 == *document && st.doc.paths.iter().any(|p| p.name == *name))
+            }
+            _ => true,
+        }
+    }
     /// The engine's target params for this path.
-    pub(crate) fn params(self) -> Value {
+    pub(crate) fn params(&self) -> Value {
         match self {
             PathRef::Work => json!({"name": "work"}),
+            PathRef::Named { name, .. } => json!({"name": name}),
             PathRef::Layer(id) => json!({"name": "layer", "layer": id}),
             // Never sent: edits to the Pen path being drawn don't go through the engine.
             PathRef::Pen => json!({}),
@@ -76,7 +98,7 @@ pub struct DirectSelection {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Drag {
     /// Editing `target`: `base` is its path at the press, `preview` the edit so far.
-    Edit { target: PathRef, base: Path, edit: Edit, start: [f64; 2], end: [f64; 2], preview: Option<Path> },
+    Edit { target: PathRef, revision: Option<u64>, base: Path, edit: Edit, start: [f64; 2], end: [f64; 2], preview: Option<Path> },
     /// Marquee-selecting anchors (⇧ adds to the selection).
     Marquee { start: [f64; 2], end: [f64; 2], add: bool },
 }
@@ -163,9 +185,23 @@ pub fn shows(app: &PhotocraftApp, mods: Modifiers) -> bool {
         || matches!(app.ui.tool, Tool::AddAnchorPoint | Tool::DeleteAnchorPoint | Tool::ConvertPoint)
 }
 
-/// The active paths, front first: the targeted vector mask or the active shape layer's path, then
+/// A selected named path is exclusive. Otherwise: explicit Work, targeted mask/active Shape, then
 /// the work path. The Pen's Auto Add/Delete edits these (`anchor_tools::pen_auto`).
+fn selected_named(app: &PhotocraftApp) -> Option<&str> {
+    app.ui.selected_path.as_deref().filter(|n| !matches!(*n, "work" | "layer"))
+}
+
 pub(crate) fn active_paths(app: &PhotocraftApp) -> Vec<(PathRef, Path)> {
+    if let Some(name) = selected_named(app) {
+        return app
+            .session
+            .active()
+            .and_then(|st| {
+                st.doc.paths.iter().find(|p| p.name == name).map(|p| (PathRef::Named { document: st.doc.id.0, name: name.to_owned() }, p.path.clone()))
+            })
+            .into_iter()
+            .collect();
+    }
     let layer = crate::vector_ui::targeted_vector_mask(app).or_else(|| crate::vector_ui::active_shape_path(app));
     let work = app.session.active().and_then(|st| st.doc.work_path.clone());
     if crate::work_path_drag::selected_work(app) {
@@ -186,6 +222,9 @@ pub(crate) fn candidates(app: &PhotocraftApp) -> Vec<(PathRef, Path)> {
         .filter(|p| !p.dragging && !p.knots.is_empty())
         .map(|p| (PathRef::Pen, crate::vector_ui::pen_path(p)));
     let mut out: Vec<_> = pen.into_iter().chain(active_paths(app)).collect();
+    if selected_named(app).is_some() {
+        return out;
+    }
     if let Some(st) = app.session.active() {
         for (path, _, l) in st.doc.walk().iter().rev() {
             if !l.visible || !(1..=path.len()).all(|n| st.doc.layer_at(&path[..n]).is_some_and(|a| a.visible)) {
@@ -223,10 +262,26 @@ fn shown_handles(ds: &DirectSelection, path: &Path) -> Vec<([usize; 2], Handle)>
     out
 }
 
+fn drag_valid(app: &PhotocraftApp) -> bool {
+    match &app.ui.direct_selection.drag {
+        Some(Drag::Edit { target, revision: Some(revision), .. }) => target.valid(app) && app.session.active().is_some_and(|st| st.revision == *revision),
+        _ => true,
+    }
+}
+fn named_revision(app: &PhotocraftApp, target: &PathRef) -> Option<u64> {
+    matches!(target, PathRef::Named { .. }).then(|| app.session.active().map(|st| st.revision)).flatten()
+}
+
 /// Canvas pointer events for Direct Selection and the Pen's ⌘ / ⌥ modes; false when the event is
 /// not theirs.
 pub fn pointer(app: &mut PhotocraftApp, ev: ToolEvent, mods: Modifiers) -> bool {
     let tool = app.ui.tool;
+    if !drag_valid(app) {
+        app.ui.direct_selection = Default::default();
+        if !matches!(ev, ToolEvent::Down { .. }) {
+            return true;
+        }
+    }
     match ev {
         ToolEvent::Down { x, y, .. } => {
             if tool == Tool::CurvaturePen && !mods.command && finish_curvature_segment(app, [x, y]) {
@@ -285,7 +340,7 @@ fn hits_pen(app: &PhotocraftApp, p: [f64; 2]) -> bool {
     let tol = 6.0 / f64::from(app.point_zoom().max(0.01));
     let ds = &app.ui.direct_selection;
     candidates(app).into_iter().filter(|(r, _)| *r == PathRef::Pen).any(|(r, path)| {
-        let handles = if ds.target == Some(r) { shown_handles(ds, &path) } else { Vec::new() };
+        let handles = if ds.target.as_ref() == Some(&r) { shown_handles(ds, &path) } else { Vec::new() };
         edit::hit(&path, Point::new(p[0], p[1]), tol, &handles).is_some()
     })
 }
@@ -297,7 +352,7 @@ fn press(app: &mut PhotocraftApp, p: [f64; 2], mods: Modifiers, convert: bool) -
     let tol = 6.0 / f64::from(app.point_zoom().max(0.01));
     let ds = &app.ui.direct_selection;
     let found = candidates(app).into_iter().find_map(|(r, path)| {
-        let handles = if ds.target == Some(r) { shown_handles(ds, &path) } else { Vec::new() };
+        let handles = if ds.target.as_ref() == Some(&r) { shown_handles(ds, &path) } else { Vec::new() };
         edit::hit(&path, Point::new(p[0], p[1]), tol, &handles).map(|h| (r, path, h))
     });
     let Some((target, base, hit)) = found else {
@@ -313,8 +368,8 @@ fn press(app: &mut PhotocraftApp, p: [f64; 2], mods: Modifiers, convert: bool) -
         let _ = app.run("layer.select", json!({"layer": id}));
     }
     let ds = &mut app.ui.direct_selection;
-    if ds.target != Some(target) {
-        *ds = DirectSelection { target: Some(target), ..Default::default() };
+    if ds.target.as_ref() != Some(&target) {
+        *ds = DirectSelection { target: Some(target.clone()), ..Default::default() };
     }
     let edit = match hit {
         Hit::Handle(k, h) => {
@@ -360,7 +415,8 @@ fn press(app: &mut PhotocraftApp, p: [f64; 2], mods: Modifiers, convert: bool) -
             Edit::Segment(k, t)
         }
     };
-    ds.drag = Some(Drag::Edit { target, base, edit, start: p, end: p, preview: None });
+    let revision = if matches!(target, PathRef::Named { .. }) { app.session.active().map(|st| st.revision) } else { None };
+    ds.drag = Some(Drag::Edit { target, revision, base, edit, start: p, end: p, preview: None });
     true
 }
 
@@ -399,23 +455,21 @@ pub(crate) fn curvature_toggle_active(app: &mut PhotocraftApp, p: [f64; 2]) {
         app.ui.status = e;
         app.ui.status_error = true;
     }
-    app.ui.direct_selection = DirectSelection { target: Some(target), anchors: vec![[s, k]], ..Default::default() };
+    app.ui.direct_selection = DirectSelection { target: Some(target.clone()), anchors: vec![[s, k]], ..Default::default() };
 }
 
 /// A segment of the active Curvature draft finishes it before this same press edits it.
 /// Anchor hits keep their existing closure/grab priority; misses continue normal drawing.
 fn finish_curvature_segment(app: &mut PhotocraftApp, p: [f64; 2]) -> bool {
     let Some(pen) = app.ui.pen.as_ref().filter(|p| p.curvature && p.moving.is_none() && p.knots.len() >= 2) else { return false };
-    // Saved named paths do not yet have a point-tool target. Do not commit and retarget Work.
-    if app.ui.tool_options.vector_mode != "shape"
-        && (pen.resumes.as_ref().is_some_and(|r| r.path != "work")
-            || (crate::vector_ui::targeted_vector_mask(app).is_none() && app.ui.selected_path.as_deref().is_some_and(|n| !matches!(n, "work" | "layer"))))
-    {
-        return false;
-    }
     let path = crate::vector_ui::pen_path(pen);
     let tol = 6.0 / f64::from(app.point_zoom().max(0.01));
     let Some(Hit::Segment([_, knot], t)) = edit::hit(&path, Point::new(p[0], p[1]), tol, &[]) else { return false };
+    if app.ui.tool_options.vector_mode != "shape" && selected_named(app).is_some_and(|name| PathRef::path(app, name).is_none()) {
+        app.ui.status = "Selected saved path no longer exists; select a path before inserting.".into();
+        app.ui.status_error = true;
+        return true;
+    }
     if !crate::vector_ui::cancel_stale(app) {
         return true;
     }
@@ -432,6 +486,8 @@ fn finish_curvature_segment(app: &mut PhotocraftApp, p: [f64; 2]) -> bool {
     };
     if target == PathRef::Work {
         crate::work_path_drag::select_whole(app);
+    } else if matches!(target, PathRef::Layer(_)) {
+        app.ui.selected_path = Some("layer".into());
     }
     let Some((_, committed)) = candidates(app).into_iter().find(|(r, _)| *r == target) else { return true };
     curvature_press_on(app, p, target, committed, Hit::Segment([subpath, knot], t))
@@ -475,14 +531,18 @@ fn curvature_press_on(app: &mut PhotocraftApp, p: [f64; 2], target: PathRef, mut
         }
         Hit::Handle(..) => return false,
     };
-    app.ui.direct_selection = DirectSelection { target: Some(target), anchors: vec![k], coalesce, ..Default::default() };
-    app.ui.direct_selection.drag = Some(Drag::Edit { target, base, edit: Edit::Curvature(vec![k]), start: p, end: p, preview: None });
+    app.ui.direct_selection = DirectSelection { target: Some(target.clone()), anchors: vec![k], coalesce, ..Default::default() };
+    let revision = named_revision(app, &target);
+    app.ui.direct_selection.drag = Some(Drag::Edit { target, revision, base, edit: Edit::Curvature(vec![k]), start: p, end: p, preview: None });
     true
 }
 
 /// End of an edit drag: commit it as one command. A click (no movement) commits nothing, except
 /// Pen + ⌥ on an anchor, which makes it a corner. The Pen path being drawn takes the edit directly.
 fn release(app: &mut PhotocraftApp, target: PathRef, base: &Path, edit: &Edit, start: [f64; 2], end: [f64; 2]) {
+    if !target.valid(app) {
+        return;
+    }
     let moved = (end[0] - start[0]).hypot(end[1] - start[1]) * f64::from(app.point_zoom()) >= 1.0;
     if target == PathRef::Pen {
         let edited = match edit {
@@ -522,7 +582,7 @@ fn marquee(app: &mut PhotocraftApp, start: [f64; 2], end: [f64; 2], add: bool) {
     let hits = candidates(app).into_iter().map(|(r, path)| (r, edit::anchors_in(&path, rect))).find(|(_, a)| !a.is_empty());
     let ds = &mut app.ui.direct_selection;
     match hits {
-        Some((r, anchors)) if add && ds.target == Some(r) => {
+        Some((r, anchors)) if add && ds.target.as_ref() == Some(&r) => {
             for a in anchors {
                 if !ds.anchors.contains(&a) {
                     ds.anchors.push(a);
@@ -544,9 +604,12 @@ fn marquee(app: &mut PhotocraftApp, start: [f64; 2], end: [f64; 2], add: bool) {
 /// in progress. Returns true when a key was used.
 pub fn arrow_keys(app: &mut PhotocraftApp, ctx: &egui::Context) -> bool {
     let ds = &app.ui.direct_selection;
-    let Some(target) = ds.target.filter(|_| app.ui.tool == Tool::DirectSelection && !ds.anchors.is_empty() && ds.drag.is_none()) else {
+    let Some(target) = ds.target.as_ref().filter(|_| app.ui.tool == Tool::DirectSelection && !ds.anchors.is_empty() && ds.drag.is_none()) else {
         return false;
     };
+    if !target.valid(app) {
+        return false;
+    }
     let anchors = ds.anchors.clone();
     use egui::Key;
     let keys = [(Key::ArrowLeft, -1.0, 0.0), (Key::ArrowRight, 1.0, 0.0), (Key::ArrowUp, 0.0, -1.0), (Key::ArrowDown, 0.0, 1.0)];
@@ -585,11 +648,11 @@ pub fn draw_overlay(app: &PhotocraftApp, painter: &egui::Painter, to_scr: &dyn F
     };
     for (r, path) in shown {
         let path = match &ds.drag {
-            Some(Drag::Edit { target, preview: Some(p), .. }) if *target == r => p.clone(),
+            Some(Drag::Edit { target, preview: Some(p), .. }) if *target == r && drag_valid(app) => p.clone(),
             _ => path,
         };
         crate::vector_ui::draw_outline(painter, &path, to_scr, accent);
-        let ours = ds.target == Some(r);
+        let ours = ds.target.as_ref() == Some(&r);
         for &(k, h) in if ours { shown_handles(ds, &path) } else { Vec::new() }.iter() {
             if let Some(kn) = path.subpaths.get(k[0]).and_then(|s| s.knots.get(k[1])) {
                 let c = if h == Handle::In { kn.in_ctrl } else { kn.out_ctrl };

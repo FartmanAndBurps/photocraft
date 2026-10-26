@@ -31,7 +31,7 @@ impl Scope {
             path: app.ui.selected_path.clone(),
             masks: (app.ui.mask_target, app.ui.vector_mask_target),
             anchors: app.ui.direct_selection.anchors.clone(),
-            point_target: app.ui.direct_selection.target,
+            point_target: app.ui.direct_selection.target.clone(),
             channel: st.channel_view.target,
             transient: (app.ui.transform.is_some(), app.ui.text_edit.is_some()),
         })
