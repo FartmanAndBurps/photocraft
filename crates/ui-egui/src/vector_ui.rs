@@ -768,11 +768,13 @@ pub fn curvature_down(app: &mut PhotocraftApp, x: f64, y: f64) {
     if !cancel_stale(app) {
         return;
     }
+    crate::pen_history::branch(app);
     if app.ui.pen.as_ref().is_some_and(|p| !p.curvature) {
         pen_commit(app, false);
     }
     let hit = curvature_hit(app, x, y);
     if hit == Some(0) && app.ui.pen.as_ref().is_some_and(|p| p.knots.len() >= 3) {
+        crate::pen_history::mark_close(app);
         pen_commit(app, true);
         return;
     }

@@ -105,10 +105,10 @@ pub(crate) fn reconcile(app: &mut PhotocraftApp) {
     }
 }
 
-/// Capture before the closing press changes the first anchor's handles.
+/// Capture the open draft before Pen closure changes handles or Curvature closure reflows them.
 pub(crate) fn mark_close(app: &mut PhotocraftApp) {
     app.pen_history.pending = match (Guard::capture(app), app.ui.pen.clone()) {
-        (Some(guard), Some(draft)) if app.ui.tool == Tool::Pen && !draft.curvature && draft.knots.len() <= 4096 => Some(Pending { guard, draft }),
+        (Some(guard), Some(draft)) if draft.drawn_with(app.ui.tool) && draft.knots.len() <= 4096 => Some(Pending { guard, draft }),
         _ => None,
     };
 }

@@ -704,3 +704,202 @@ fn closed_pen_snapshot_limit_preserves_all_redo_instead_of_falling_into_document
     assert!(h.state().ui.pen.is_none());
     assert_eq!(h.state().session.active().unwrap().doc.work_path, closed);
 }
+
+fn curvature_draft(h: &mut Harness<'static, PhotocraftApp>) -> crate::vector_ui::PenPath {
+    h.state_mut().ui.tool = Tool::CurvaturePen;
+    h.run_steps(2);
+    for p in [[30.0, 30.0], [120.0, 30.0], [140.0, 90.0], [50.0, 110.0]] {
+        click(h, p);
+    }
+    h.state().ui.pen.clone().unwrap()
+}
+
+#[test]
+fn curvature_pen_closure_undo_reopens_then_anchor_undo_redo_preserves_curve() {
+    for mode in ["path", "shape"] {
+        let mut h = harness();
+        h.state_mut().ui.tool_options.vector_mode = mode.into();
+        let draft = curvature_draft(&mut h);
+        assert!(draft.curvature);
+        let before = h.state().session.active().unwrap().history.past_len();
+        click(&mut h, [30.0, 30.0]);
+        assert!(h.state().ui.pen.is_none());
+        let closed = h.state().session.active().unwrap().doc.clone();
+        assert_eq!(h.state().session.active().unwrap().history.past_len(), before + 1);
+        for _ in 0..3 {
+            history_key(&mut h, false);
+            assert_eq!(h.state().ui.pen.as_ref().map(|p| &p.knots), Some(&draft.knots), "Curvature closure Undo must restore its editable open curve");
+            assert!(h.state().ui.pen.as_ref().unwrap().curvature);
+            history_key(&mut h, false);
+            let pen = h.state().ui.pen.as_ref().unwrap();
+            let anchors: Vec<_> = draft.knots[..3].iter().map(|k| k[0]).collect();
+            assert_eq!(pen.knots, photocraft_vector::edit::curvature_knots(&anchors, &[false; 3], false), "anchor Undo must reflow the remaining open curve");
+            history_key(&mut h, true);
+            assert_eq!(h.state().ui.pen.as_ref().unwrap(), &draft, "anchor Redo restores exact pre-Undo smooth controls");
+            history_key(&mut h, true);
+            assert!(h.state().ui.pen.is_none());
+            let doc = &h.state().session.active().unwrap().doc;
+            assert_eq!(doc.work_path, closed.work_path);
+            assert_eq!(doc.layers, closed.layers, "closure Redo must not duplicate Shape layers or change IDs");
+        }
+    }
+}
+
+#[test]
+fn curvature_pen_corner_flags_and_open_closed_smoothing_roundtrip_exactly() {
+    for mode in ["path", "shape"] {
+        let mut h = harness();
+        h.state_mut().ui.tool_options.vector_mode = mode.into();
+        curvature_draft(&mut h);
+        for point in [[120.0, 30.0], [50.0, 110.0]] {
+            crate::vector_ui::curvature_toggle(h.state_mut(), point[0], point[1]);
+        }
+        let draft = h.state().ui.pen.clone().unwrap();
+        assert_eq!(draft.unlinked, vec![1, 3]);
+        click(&mut h, [30.0, 30.0]);
+        let doc = h.state().session.active().unwrap().doc.clone();
+        let path = if mode == "path" {
+            doc.work_path.clone().unwrap()
+        } else {
+            let id = h.state().session.active().unwrap().active_layer.unwrap();
+            let photocraft_doc::LayerContent::Shape(shape) = &doc.layer(id).unwrap().content else { panic!("shape path") };
+            shape.path.clone()
+        };
+        let anchors: Vec<_> = draft.knots.iter().map(|k| k[0]).collect();
+        let expected = photocraft_vector::edit::curvature_knots(&anchors, &[false, true, false, true], true);
+        assert!(path.subpaths[0].closed);
+        assert_eq!(path.subpaths[0].knots.len(), draft.knots.len(), "closing must retain every anchor");
+        for (k, want) in path.subpaths[0].knots.iter().zip(expected) {
+            assert_eq!([[k.anchor.x, k.anchor.y], [k.in_ctrl.x, k.in_ctrl.y], [k.out_ctrl.x, k.out_ctrl.y]], want);
+        }
+        history_menu(&mut h, false);
+        assert_eq!(h.state().ui.pen.as_ref().unwrap(), &draft, "reopen returns the original open-curve controls and corners");
+        history_menu(&mut h, false);
+        let pen = h.state().ui.pen.as_ref().unwrap();
+        assert_eq!(pen.unlinked, vec![1], "removed corner index must be pruned");
+        assert_eq!(pen.knots, photocraft_vector::edit::curvature_knots(&anchors[..3], &[false, true, false], false));
+        history_menu(&mut h, true);
+        assert_eq!(h.state().ui.pen.as_ref().unwrap(), &draft);
+        history_menu(&mut h, true);
+        assert_eq!(h.state().session.active().unwrap().doc.work_path, doc.work_path);
+        assert_eq!(h.state().session.active().unwrap().doc.layers, doc.layers);
+    }
+}
+
+#[test]
+fn curvature_pen_reopened_edits_discard_obsolete_redo_and_reclose_without_duplicates() {
+    for mode in ["path", "shape"] {
+        for edit in ["add", "drag", "corner"] {
+            let mut h = harness();
+            h.state_mut().ui.tool_options.vector_mode = mode.into();
+            curvature_draft(&mut h);
+            click(&mut h, [30.0, 30.0]);
+            history_key(&mut h, false);
+            history_key(&mut h, false);
+            match edit {
+                "add" => click(&mut h, [70.0, 120.0]),
+                "drag" => drag(&mut h, &[[120.0, 30.0], [110.0, 50.0]], None),
+                _ => crate::vector_ui::curvature_toggle(h.state_mut(), 120.0, 30.0),
+            }
+            h.state_mut().sync_views();
+            assert!(!h.state().session.active().unwrap().history.can_redo(), "{mode}/{edit}: obsolete closure removed");
+            assert!(!crate::pen_history::can_redo(h.state()));
+            let changed = h.state().ui.pen.clone().unwrap();
+            assert!(changed.curvature);
+            click(&mut h, [30.0, 30.0]);
+            let doc = h.state().session.active().unwrap().doc.clone();
+            if mode == "shape" {
+                assert_eq!(doc.layers.len(), 2, "one background and one new shape");
+            }
+            history_menu(&mut h, false);
+            assert_eq!(h.state().ui.pen.as_ref().unwrap(), &changed);
+            history_menu(&mut h, true);
+            assert_eq!(h.state().session.active().unwrap().doc.work_path, doc.work_path);
+            assert_eq!(h.state().session.active().unwrap().doc.layers, doc.layers);
+        }
+    }
+}
+
+#[test]
+fn curvature_pen_history_panel_rows_and_aliases_share_recovery() {
+    for mode in ["path", "shape"] {
+        let mut h = harness();
+        h.state_mut().ui.tool_options.vector_mode = mode.into();
+        let draft = curvature_draft(&mut h);
+        let before = h.state().session.active().unwrap().history.past_len();
+        click(&mut h, [30.0, 30.0]);
+        let doc = h.state().session.active().unwrap().doc.clone();
+        h.state_mut().run("history.selectState", json!({"state":before})).unwrap();
+        assert_eq!(h.state().ui.pen.as_ref().unwrap(), &draft);
+        assert!(crate::menus::is_enabled(h.state(), "history.stepBackward"));
+        h.state_mut().run("history.stepBackward", json!({})).unwrap();
+        assert_eq!(h.state().ui.pen.as_ref().unwrap().knots.len(), 3);
+        h.state_mut().run("history.stepForward", json!({})).unwrap();
+        assert_eq!(h.state().ui.pen.as_ref().unwrap(), &draft);
+        h.state_mut().run("history.selectState", json!({"state":before+1})).unwrap();
+        assert!(h.state().ui.pen.is_none());
+        assert_eq!(h.state().session.active().unwrap().doc.work_path, doc.work_path);
+        assert_eq!(h.state().session.active().unwrap().doc.layers, doc.layers);
+    }
+}
+
+#[test]
+fn curvature_pen_failed_close_restores_open_smoothing_without_creating_history() {
+    for mode in ["path", "shape"] {
+        let mut h = harness();
+        h.state_mut().ui.tool_options.vector_mode = mode.into();
+        let draft = curvature_draft(&mut h);
+        let before = h.state().session.active().unwrap().doc.clone();
+        let past = h.state().session.active().unwrap().history.past_len();
+        h.state_mut().session.authorize = Some(|id, _| {
+            if matches!(id, "path.set" | "shape.create") { Err(photocraft_engine::EngineError::Other("denied Curvature closure".into())) } else { Ok(()) }
+        });
+        click(&mut h, [30.0, 30.0]);
+        assert_eq!(h.state().ui.pen.as_ref().unwrap(), &draft);
+        assert_eq!(h.state().session.active().unwrap().history.past_len(), past);
+        assert_eq!(h.state().session.active().unwrap().doc.work_path, before.work_path);
+        assert_eq!(h.state().session.active().unwrap().doc.layers, before.layers);
+        h.state_mut().session.authorize = None;
+        click(&mut h, [30.0, 30.0]);
+        history_menu(&mut h, false);
+        assert_eq!(h.state().ui.pen.as_ref().unwrap(), &draft);
+    }
+}
+
+#[test]
+fn curvature_pen_recovery_keeps_shared_history_guards_and_document_ownership() {
+    let mut h = harness();
+    let draft = curvature_draft(&mut h);
+    click(&mut h, [30.0, 30.0]);
+    history_menu(&mut h, false);
+    assert!(h.state_mut().run("layer.new.layer", json!({})).unwrap_err().contains("Finish the reopened Pen path"));
+    assert_eq!(h.state().ui.pen.as_ref().unwrap(), &draft);
+    let owner = h.state().session.active().unwrap().doc.id;
+    // Exercise the existing stale-owner route; the normal command gate was checked above.
+    h.state_mut().session.execute("file.new", json!({"width":100,"height":100})).unwrap();
+    h.state_mut().sync_views();
+    assert!(h.state().ui.pen.is_none());
+    assert_ne!(h.state().session.active().unwrap().doc.id, owner);
+    assert!(h.state().session.active().unwrap().doc.work_path.is_none());
+    h.state_mut().session.set_active(0);
+    h.state_mut().sync_views();
+    let path = h.state().session.active().unwrap().doc.work_path.as_ref().unwrap();
+    assert!(!path.subpaths[0].closed, "switching documents preserves an ordinary open curve in its owning document");
+    assert_eq!(path.subpaths[0].knots.len(), draft.knots.len());
+    assert!(!h.state().session.active().unwrap().history.can_redo());
+}
+
+#[test]
+fn curvature_pen_ordinary_open_anchor_undo_keeps_existing_smoothing_and_document_history() {
+    let mut h = harness();
+    let draft = curvature_draft(&mut h);
+    let past = h.state().session.active().unwrap().history.past_len();
+    history_key(&mut h, false);
+    let anchors: Vec<_> = draft.knots[..3].iter().map(|k| k[0]).collect();
+    let pen = h.state().ui.pen.as_ref().unwrap();
+    assert!(pen.curvature);
+    assert_eq!(pen.knots, photocraft_vector::edit::curvature_knots(&anchors, &[false; 3], false));
+    assert_eq!(h.state().session.active().unwrap().history.past_len(), past);
+    assert!(h.state().session.active().unwrap().doc.work_path.is_none());
+    assert!(!h.state().session.active().unwrap().history.can_redo(), "ordinary open-path behaviour is retained");
+}
