@@ -3515,6 +3515,12 @@ fn hdr_preview(app: &PhotocraftApp, doc: &photocraft_doc::Document) -> Option<[f
 /// Draw one canvas view and handle its input. `primary` = main window (tools active).
 pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect: Rect, mut view: View, primary: bool) -> View {
     let ctx = ui.ctx().clone();
+    if primary {
+        crate::work_path_drag::reconcile(app, ctx.input(|i| i.focused));
+    }
+    if crate::work_path_drag::preview(app).is_some() {
+        ctx.request_repaint();
+    }
     // The camera as the app holds it before this frame's input. The canvas works on its own copy
     // (`view`) and writes it back at the end; a tool that moves the camera itself meanwhile (the
     // Crop tool's default mode pans and turns the view with the image, `crop_mode`) must not be
@@ -5894,6 +5900,7 @@ fn tool_move(app: &mut PhotocraftApp, x: f64, y: f64, pressure: f32, mods: egui:
             d.points.push([x, y, pressure as f64]);
             app.stylus.record_point();
         }
+        crate::work_path_drag::motion(app, [x, y]);
     }
 }
 
@@ -6190,11 +6197,13 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
             match tool {
                 Tool::PathSelection => {
                     let tol = 6.0 / f64::from(app.point_zoom().max(0.01));
-                    if let Some(st) = app.session.active()
+                    if !crate::work_path_drag::selected_work(app)
+                        && let Some(st) = app.session.active()
                         && let Some(id) = crate::vector_ui::pick_shape_at(&st.doc, [x, y], tol)
                     {
                         let _ = app.run("layer.select", json!({"layer": id.0}));
                     }
+                    crate::work_path_drag::press(app, [x, y]);
                 }
                 Tool::Pen => {
                     if !(mods.alt && crate::vector_ui::pen_grab_handle(app, x, y)) {

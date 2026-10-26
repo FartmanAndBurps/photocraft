@@ -1468,6 +1468,8 @@ pub struct UiState {
     /// Direct Selection tool: selected anchors and the drag in progress (#790).
     #[serde(default)]
     pub direct_selection: crate::direct_select::DirectSelection,
+    #[serde(skip)]
+    pub work_path_drag: crate::work_path_drag::State,
     /// A live rectangle's corner radius widget being dragged (TOOL-214-12).
     #[serde(skip)]
     pub corner_radius: Option<crate::corner_radius::Drag>,
@@ -1675,6 +1677,7 @@ impl Default for UiState {
             pen_doc: None,
             stroke_editor: None,
             direct_selection: Default::default(),
+            work_path_drag: Default::default(),
             corner_radius: None,
             selected_path: None,
             panels: Panels::default(),

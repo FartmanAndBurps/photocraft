@@ -935,6 +935,9 @@ pub(crate) fn delete_key_deletes_work_path(app: &PhotocraftApp) -> bool {
 /// The path Path Selection edits: the targeted vector mask, the active shape layer's path, else
 /// the work path.
 fn target_path(app: &PhotocraftApp) -> Option<(PathTarget, Path)> {
+    if crate::work_path_drag::selected_work(app) {
+        return app.session.active()?.doc.work_path.clone().map(|p| (PathTarget::Work, p));
+    }
     if let Some((id, p)) = targeted_vector_mask(app) {
         return Some((PathTarget::VectorMask(id), p));
     }
@@ -1036,6 +1039,13 @@ pub fn pick_shape_at(doc: &Document, at: [f64; 2], tol: f64) -> Option<photocraf
 }
 
 pub fn path_selection_finish(app: &mut PhotocraftApp, start: [f64; 2], end: [f64; 2]) {
+    if let Some(result) = crate::work_path_drag::finish(app, start, end) {
+        if let Err(error) = result {
+            app.ui.status = error;
+            app.ui.status_error = true;
+        }
+        return;
+    }
     let (dx, dy) = (end[0] - start[0], end[1] - start[1]);
     let tol = 6.0 / f64::from(app.point_zoom().max(0.01));
     if dx.abs() + dy.abs() < 0.5 {
@@ -1211,7 +1221,15 @@ pub fn draw_overlay(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform
         if let Some(wp) = &doc.work_path
             && (anchors || app.ui.selected_path.as_deref() == Some("work"))
         {
-            draw_path(wp, anchors);
+            let delta =
+                if app.session.active().is_some_and(|st| st.doc.id == doc.id) { crate::work_path_drag::preview(app).unwrap_or([0.0, 0.0]) } else { [0.0, 0.0] };
+            let shown = |p: [f64; 2]| to_scr([p[0] + delta[0], p[1] + delta[1]]);
+            draw_outline(painter, wp, &shown, accent);
+            if anchors {
+                for k in wp.subpaths.iter().flat_map(|sp| &sp.knots) {
+                    draw_anchor(painter, shown([k.anchor.x, k.anchor.y]), false, accent);
+                }
+            }
         }
         // The saved path selected in the Paths panel is the target path (#6550).
         if let Some(p) = selected_saved_path(app) {
@@ -1867,6 +1885,9 @@ pub fn paths_panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                     action = Some(("path.toSelection", json!({"name": key, "mode": mode})));
                 } else if resp.clicked() {
                     app.ui.selected_path = Some(key.clone());
+                    if *kind == PathRow::Work {
+                        crate::work_path_drag::select_whole(app);
+                    }
                 }
                 // As in Photoshop, double-clicking a saved path's name renames it, and double-clicking
                 // the Work Path asks for the name to save it under (#6238).

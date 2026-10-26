@@ -258,6 +258,7 @@ pub mod wheel_nav;
 pub mod wide_angle_ui;
 pub mod widgets;
 pub mod work_area;
+mod work_path_drag;
 pub mod workspace_ui;
 pub mod zoom_hold;
 pub mod zoom_levels;
@@ -1282,6 +1283,9 @@ impl PhotocraftApp {
             self.session.authorize = gate;
         }
         let result = self.run_command(id, params);
+        if result.is_ok() {
+            work_path_drag::after_command(self, id);
+        }
         if gate.is_some() {
             self.session.authorize = None;
         }

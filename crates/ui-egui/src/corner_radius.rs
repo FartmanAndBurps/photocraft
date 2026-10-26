@@ -149,6 +149,7 @@ pub struct Drag {
 /// Do the widgets show with the current tool?
 fn shows(app: &PhotocraftApp) -> bool {
     app.ui.transform.is_none()
+        && !(app.ui.tool == Tool::PathSelection && crate::work_path_drag::selected_work(app))
         && match app.ui.tool {
             Tool::PathSelection | Tool::Rectangle | Tool::Triangle | Tool::Polygon => true,
             Tool::Move => app.ui.tool_options.move_show_transform,
