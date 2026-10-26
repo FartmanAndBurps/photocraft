@@ -241,6 +241,7 @@ pub fn closes_path_at(app: &PhotocraftApp, tool: Tool, x: f64, y: f64) -> bool {
 /// or add a new anchor (dragging a new anchor pulls symmetrical handles). With ⇧ a new anchor
 /// lands on the nearest 45° ray from the previous one, at the pointer's projection onto it.
 pub fn pen_down(app: &mut PhotocraftApp, x: f64, y: f64, shift: bool) {
+    crate::pen_history::branch(app);
     if !cancel_stale(app) {
         return;
     }
@@ -254,6 +255,9 @@ pub fn pen_down(app: &mut PhotocraftApp, x: f64, y: f64, shift: bool) {
         && let Some(resumed) = resume_at(app, x, y, tol)
     {
         app.ui.pen = Some(resumed);
+    }
+    if app.ui.pen.as_ref().is_some_and(|p| on_closing_anchor(p, x, y, tol)) {
+        crate::pen_history::mark_close(app);
     }
     let pen = app.ui.pen.get_or_insert_with(PenPath::default);
     pen.adjusting_in = false;
@@ -527,6 +531,7 @@ pub fn pen_commit(app: &mut PhotocraftApp, closed: bool) {
     if !cancel_stale(app) {
         return;
     }
+    let pending_close = crate::pen_history::take_close(app, closed);
     let Some(mut pen) = app.ui.pen.take() else { return };
     app.ui.pen_doc = None;
     if app.ui.direct_selection.target == Some(crate::direct_select::PathRef::Pen) {
@@ -537,6 +542,7 @@ pub fn pen_commit(app: &mut PhotocraftApp, closed: bool) {
         curvature_refresh(&mut pen, closed);
     }
     commit_path(app, &pen, closed);
+    crate::pen_history::committed(app, pending_close);
 }
 
 /// Commit a finished Pen, Freeform Pen or Curvature Pen path, as one History step: a new shape

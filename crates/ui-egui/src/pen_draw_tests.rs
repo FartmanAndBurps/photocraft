@@ -302,3 +302,405 @@ fn space_pan_keeps_the_pen_path_in_progress_visible() {
     assert_eq!(h.state().ui.pen.as_ref().map(|p| p.knots.len()), Some(2), "the path in progress survives the pan");
     assert!(pen_path_painted(&h, screen(&h, [20.0, 20.0])), "drawn after the pan");
 }
+
+// FartCraft closed-path Undo investigation. These tests use the existing canvas harness,
+// menu dispatcher and keyboard route; no installed application or printer is involved.
+fn history_key(h: &mut Harness<'static, PhotocraftApp>, redo: bool) {
+    let modifiers = if redo { Modifiers::COMMAND | Modifiers::SHIFT } else { Modifiers::COMMAND };
+    mods(h, modifiers);
+    for pressed in [true, false] {
+        h.event(egui::Event::Key { key: Key::Z, physical_key: None, pressed, repeat: false, modifiers });
+        h.run_steps(1);
+    }
+    mods(h, Modifiers::NONE);
+}
+
+fn history_menu(h: &mut Harness<'static, PhotocraftApp>, redo: bool) {
+    let ctx = h.ctx.clone();
+    crate::menus::invoke(h.state_mut(), &ctx, if redo { "edit.redo" } else { "edit.undo" }, json!({})).unwrap();
+    h.run_steps(1);
+}
+
+fn curved_draft(h: &mut Harness<'static, PhotocraftApp>) -> crate::vector_ui::PenPath {
+    click(h, [20.0, 20.0]);
+    drag(h, &[[120.0, 20.0], [140.0, 40.0]], None);
+    click(h, [120.0, 100.0]);
+    h.state().ui.pen.clone().unwrap()
+}
+
+/// Closure remains one document transaction; interactive Undo overlays its editable draft,
+/// and menu/keyboard Redo reuse the transaction, retaining exact geometry and layer IDs.
+#[test]
+fn closed_pen_undo_current_document_transaction_roundtrips() {
+    for mode in ["path", "shape"] {
+        for keyboard in [false, true] {
+            let mut h = harness();
+            h.state_mut().ui.tool_options.vector_mode = mode.into();
+            h.state_mut().run("shape.create", json!({"kind": "rect", "rect": [150, 110, 20, 20], "fill": "#ff0000"})).unwrap();
+            let previous = h.state().session.active().unwrap().doc.clone();
+            let past = h.state().session.active().unwrap().history.past_len();
+            curved_draft(&mut h);
+            click(&mut h, [20.0, 20.0]);
+            assert!(h.state().ui.pen.is_none());
+            let closed = h.state().session.active().unwrap().doc.clone();
+            assert_eq!(h.state().session.active().unwrap().history.past_len(), past + 1);
+            for _ in 0..3 {
+                if keyboard {
+                    history_key(&mut h, false)
+                } else {
+                    history_menu(&mut h, false)
+                }
+                let doc = &h.state().session.active().unwrap().doc;
+                assert_eq!(doc.work_path, previous.work_path);
+                assert_eq!(doc.layers, previous.layers, "unrelated layer survives; completed shape is removed");
+                assert!(h.state().ui.pen.is_some(), "closure Undo reconstructs an editable draft");
+                if keyboard {
+                    history_key(&mut h, true)
+                } else {
+                    history_menu(&mut h, true)
+                }
+                let doc = &h.state().session.active().unwrap().doc;
+                assert_eq!(doc.work_path, closed.work_path);
+                assert_eq!(doc.layers, closed.layers, "Redo restores exact closed geometry");
+            }
+        }
+    }
+}
+
+/// Draft Undo is not a history transaction and currently retains no redoable point. A closure
+/// snapshot alone cannot implement the requested Undo -> remove anchor -> Redo -> reclose chain.
+#[test]
+fn closed_pen_investigation_open_draft_undo_has_no_redo() {
+    let mut h = harness();
+    let draft = curved_draft(&mut h);
+    let past = h.state().session.active().unwrap().history.past_len();
+    history_key(&mut h, false);
+    assert_eq!(h.state().ui.pen.as_ref().unwrap().knots, draft.knots[..2]);
+    assert_eq!(h.state().session.active().unwrap().history.past_len(), past);
+    assert!(!h.state().session.active().unwrap().history.can_redo());
+    assert!(!crate::menus::is_enabled(h.state(), "edit.redo"));
+}
+
+/// Regression: closure Undo, anchor Undo, anchor Redo, closure Redo, repeated in both modes.
+#[test]
+fn closed_pen_undo_reopens_draft_then_redoes_anchor_and_closure() {
+    for mode in ["path", "shape"] {
+        let mut h = harness();
+        h.state_mut().ui.tool_options.vector_mode = mode.into();
+        let draft = curved_draft(&mut h);
+        click(&mut h, [20.0, 20.0]);
+        let closed = h.state().session.active().unwrap().doc.clone();
+        for _ in 0..3 {
+            history_key(&mut h, false);
+            assert_eq!(
+                h.state().ui.pen.as_ref().map(|p| &p.knots),
+                Some(&draft.knots),
+                "closure Undo must reopen the editable draft, preserving anchors/handles"
+            );
+            history_key(&mut h, false);
+            assert_eq!(h.state().ui.pen.as_ref().unwrap().knots, draft.knots[..2]);
+            history_key(&mut h, true);
+            assert_eq!(h.state().ui.pen.as_ref().unwrap().knots, draft.knots, "first Redo restores the removed anchor");
+            history_key(&mut h, true);
+            assert!(h.state().ui.pen.is_none(), "second Redo restores closure");
+            let doc = &h.state().session.active().unwrap().doc;
+            assert_eq!(doc.work_path, closed.work_path);
+            assert_eq!(doc.layers, closed.layers);
+        }
+    }
+}
+
+#[test]
+fn closed_pen_history_panel_and_aliases_use_the_same_closure() {
+    for mode in ["path", "shape"] {
+        let mut h = harness();
+        h.state_mut().ui.tool_options.vector_mode = mode.into();
+        let draft = curved_draft(&mut h);
+        let before = h.state().session.active().unwrap().history.past_len();
+        click(&mut h, [20.0, 20.0]);
+        let closed = h.state().session.active().unwrap().doc.clone();
+        h.state_mut().run("history.selectState", json!({"state": before})).unwrap();
+        assert_eq!(h.state().ui.pen.as_ref().unwrap().knots, draft.knots);
+        h.state_mut().run("history.undo", json!({})).unwrap();
+        assert_eq!(h.state().ui.pen.as_ref().unwrap().knots.len(), 2);
+        h.state_mut().run("history.redo", json!({})).unwrap();
+        assert_eq!(h.state().ui.pen.as_ref().unwrap().knots, draft.knots);
+        h.state_mut().run("history.selectState", json!({"state": before + 1})).unwrap();
+        assert!(h.state().ui.pen.is_none());
+        assert_eq!(h.state().session.active().unwrap().doc.layers, closed.layers);
+        assert_eq!(h.state().session.active().unwrap().doc.work_path, closed.work_path);
+        h.state_mut().run("history.stepBackward", json!({})).unwrap();
+        assert!(h.state().ui.pen.is_some());
+        h.state_mut().run("history.stepForward", json!({})).unwrap();
+        assert!(h.state().ui.pen.is_none());
+    }
+}
+
+#[test]
+fn closed_pen_edit_after_reopen_discards_old_closure_and_draft_redo() {
+    for mode in ["path", "shape"] {
+        let mut h = harness();
+        h.state_mut().ui.tool_options.vector_mode = mode.into();
+        curved_draft(&mut h);
+        click(&mut h, [20.0, 20.0]);
+        history_key(&mut h, false);
+        history_key(&mut h, false);
+        click(&mut h, [60.0, 110.0]);
+        assert!(!h.state().session.active().unwrap().history.can_redo());
+        assert!(!crate::menus::is_enabled(h.state(), "edit.redo"));
+        let changed = h.state().ui.pen.clone().unwrap();
+        click(&mut h, [20.0, 20.0]);
+        let closed = h.state().session.active().unwrap().doc.clone();
+        history_menu(&mut h, false);
+        assert_eq!(h.state().ui.pen.as_ref().unwrap().knots, changed.knots);
+        history_menu(&mut h, true);
+        assert_eq!(h.state().session.active().unwrap().doc.layers, closed.layers);
+        assert_eq!(h.state().session.active().unwrap().doc.work_path, closed.work_path);
+        if mode == "shape" {
+            assert_eq!(closed.layers.len(), 2, "background and exactly one Pen shape");
+        }
+    }
+}
+
+#[test]
+fn closed_pen_reopened_document_commands_wait_until_draft_is_finished() {
+    let mut h = harness();
+    curved_draft(&mut h);
+    click(&mut h, [20.0, 20.0]);
+    history_menu(&mut h, false);
+    let draft = h.state().ui.pen.clone();
+    let doc = h.state().session.active().unwrap().doc.clone();
+    let past = h.state().session.active().unwrap().history.past_len();
+    for (id, params) in [
+        ("shape.create", json!({"kind": "rect", "rect": [150, 110, 20, 20]})),
+        ("select.rect", json!({"x": 1, "y": 1, "width": 10, "height": 10})),
+        ("layer.select", json!({"layer": doc.layers[0].id.0})),
+        ("history.clear", json!({})),
+    ] {
+        assert!(h.state_mut().run(id, params).unwrap_err().contains("Finish the reopened Pen path"));
+        assert_eq!(h.state().ui.pen, draft);
+        assert_eq!(h.state().session.active().unwrap().history.past_len(), past);
+        assert_eq!(h.state().session.active().unwrap().doc.layers, doc.layers);
+    }
+    // Finishing as an ordinary open path clears the obsolete closure future.
+    h.key_press(Key::Enter);
+    h.run_steps(2);
+    assert!(h.state().ui.pen.is_none());
+    assert!(!h.state().session.active().unwrap().history.can_redo());
+    assert!(!h.state().session.active().unwrap().doc.work_path.as_ref().unwrap().subpaths[0].closed);
+    h.state_mut().run("shape.create", json!({"kind": "rect", "rect": [150, 110, 20, 20]})).unwrap();
+    history_menu(&mut h, false);
+    assert!(h.state().session.active().unwrap().doc.work_path.is_some(), "Undo removes only the unrelated edit");
+    history_menu(&mut h, false);
+    assert!(h.state().ui.pen.is_none(), "ordinary open commit retains upstream document Undo");
+}
+
+#[test]
+fn closed_pen_scope_changes_invalidate_recovery_without_reviving_old_geometry() {
+    for change in ["tool", "path", "layer", "mode", "anchors", "point-target", "channel", "raw-edit"] {
+        let mut h = harness();
+        curved_draft(&mut h);
+        click(&mut h, [20.0, 20.0]);
+        history_menu(&mut h, false);
+        let draft = h.state().ui.pen.clone();
+        match change {
+            "tool" => h.state_mut().ui.tool = Tool::Move,
+            "path" => h.state_mut().ui.selected_path = Some("other".into()),
+            "layer" => h.state_mut().session.active_mut().unwrap().active_layer = None,
+            "mode" => h.state_mut().ui.tool_options.vector_mode = "shape".into(),
+            "anchors" => h.state_mut().ui.direct_selection.anchors.push([0, 1]),
+            "point-target" => h.state_mut().ui.direct_selection.target = Some(crate::direct_select::PathRef::Work),
+            "channel" => h.state_mut().session.active_mut().unwrap().channel_view.target = photocraft_engine::channel_cmds::ChannelTarget::VectorMask,
+            _ => {
+                h.state_mut().session.execute("shape.create", json!({"kind": "rect", "rect": [150, 110, 20, 20]})).unwrap();
+            }
+        }
+        h.state_mut().sync_views();
+        assert_eq!(h.state().ui.pen, draft, "{change}: preserve the draft as ordinary pending Pen geometry");
+        assert!(!h.state().session.active().unwrap().history.can_redo(), "{change}: no stale closure future");
+        assert!(!crate::pen_history::can_redo(h.state()));
+    }
+}
+
+#[test]
+fn closed_pen_switching_documents_never_restores_a_draft_into_the_other_document() {
+    let mut h = harness();
+    curved_draft(&mut h);
+    click(&mut h, [20.0, 20.0]);
+    history_menu(&mut h, false);
+    let owner = h.state().session.active().unwrap().doc.id;
+    // Raw switch exercises the existing stale-draft ownership path, not a rejected edit command.
+    h.state_mut().session.execute("file.new", json!({"width": 100, "height": 100})).unwrap();
+    h.state_mut().sync_views();
+    assert_ne!(h.state().session.active().unwrap().doc.id, owner);
+    assert!(h.state().ui.pen.is_none());
+    assert!(h.state().session.active().unwrap().doc.work_path.is_none());
+    h.state_mut().session.set_active(0);
+    h.state_mut().sync_views();
+    let st = h.state().session.active().unwrap();
+    assert!(st.doc.work_path.is_some(), "existing ownership handling preserves the open draft in its source document");
+    assert!(!st.history.can_redo());
+    assert!(!crate::pen_history::can_redo(h.state()));
+}
+
+#[test]
+fn closed_pen_unrelated_history_then_closure_undo_does_not_undo_the_wrong_step() {
+    let mut h = harness();
+    curved_draft(&mut h);
+    click(&mut h, [20.0, 20.0]);
+    let path = h.state().session.active().unwrap().doc.work_path.clone();
+    h.state_mut().run("shape.create", json!({"kind": "rect", "rect": [150, 110, 20, 20]})).unwrap();
+    history_menu(&mut h, false);
+    assert!(h.state().ui.pen.is_none());
+    assert_eq!(h.state().session.active().unwrap().doc.work_path, path);
+    history_menu(&mut h, false);
+    assert!(h.state().ui.pen.is_none(), "the ended interaction does not resurrect a stale draft");
+    assert!(h.state().session.active().unwrap().doc.work_path.is_none());
+    history_menu(&mut h, true);
+    history_menu(&mut h, true);
+    assert_eq!(h.state().session.active().unwrap().doc.work_path, path);
+}
+
+#[test]
+fn closed_pen_close_drag_undo_restores_original_handles_and_redo_exact_closure() {
+    let mut h = harness();
+    let draft = curved_draft(&mut h);
+    drag(&mut h, &[[20.0, 20.0], [40.0, 0.0]], None);
+    let closed = h.state().session.active().unwrap().doc.work_path.clone();
+    history_key(&mut h, false);
+    assert_eq!(h.state().ui.pen.as_ref().unwrap().knots, draft.knots);
+    history_key(&mut h, true);
+    assert_eq!(h.state().session.active().unwrap().doc.work_path, closed);
+}
+
+#[test]
+fn closed_pen_direct_selection_edit_and_history_jump_clear_incompatible_recovery() {
+    for edit in [true, false] {
+        let mut h = harness();
+        h.state_mut().run("shape.create", json!({"kind": "rect", "rect": [150, 110, 20, 20]})).unwrap();
+        curved_draft(&mut h);
+        click(&mut h, [20.0, 20.0]);
+        history_menu(&mut h, false);
+        if edit {
+            h.state_mut().ui.pen.as_mut().unwrap().knots[1][0][0] += 7.0;
+            h.state_mut().sync_views();
+            assert!(!h.state().session.active().unwrap().history.can_redo());
+            assert!(h.state().ui.pen.is_some(), "edited draft is preserved");
+        } else {
+            h.state_mut().run("history.selectState", json!({"state": 0})).unwrap();
+            assert!(h.state().ui.pen.is_none(), "jumping away must not leave a ghost draft");
+            assert!(!crate::pen_history::can_redo(h.state()));
+        }
+    }
+}
+
+#[test]
+fn closed_pen_failed_closure_and_denied_history_preserve_the_draft_and_future() {
+    let mut h = harness();
+    let draft = curved_draft(&mut h);
+    h.state_mut().session.authorize =
+        Some(|id, _| if id == "path.set" { Err(photocraft_engine::EngineError::Other("test denied closure".into())) } else { Ok(()) });
+    click(&mut h, [20.0, 20.0]);
+    assert_eq!(h.state().ui.pen.as_ref().unwrap().knots, draft.knots);
+    assert!(h.state().session.active().unwrap().doc.work_path.is_none());
+    h.state_mut().session.authorize = None;
+    click(&mut h, [20.0, 20.0]);
+    let closed = h.state().session.active().unwrap().doc.work_path.clone();
+    h.state_mut().session.authorize = Some(|_, _| Err(photocraft_engine::EngineError::Other("test denied history".into())));
+    assert!(h.state_mut().run("edit.undo", json!({})).is_err());
+    assert!(h.state().ui.pen.is_none());
+    assert_eq!(h.state().session.active().unwrap().doc.work_path, closed);
+    h.state_mut().session.authorize = None;
+    history_menu(&mut h, false);
+    h.state_mut().session.authorize = Some(|_, _| Err(photocraft_engine::EngineError::Other("test denied history".into())));
+    assert!(h.state_mut().run("edit.redo", json!({})).is_err());
+    assert_eq!(h.state().ui.pen.as_ref().unwrap().knots, draft.knots);
+    assert!(crate::pen_history::can_redo(h.state()));
+    h.state_mut().session.authorize = None;
+    history_menu(&mut h, true);
+    assert_eq!(h.state().session.active().unwrap().doc.work_path, closed);
+}
+
+#[test]
+fn closed_pen_history_bad_params_and_float_rows_do_not_lose_geometry() {
+    let mut h = harness();
+    curved_draft(&mut h);
+    click(&mut h, [20.0, 20.0]);
+    assert!(h.state_mut().run("edit.undo", json!([])).is_err());
+    assert!(h.state().ui.pen.is_none());
+    let before = h.state().session.active().unwrap().history.past_len() - 1;
+    let result = h.state_mut().run("history.selectState", json!({"state": before as f64})).unwrap();
+    assert_eq!(result["state"], before);
+    assert_eq!(result["changed"], true);
+    let draft = h.state().ui.pen.clone();
+    for params in [json!({}), json!({"state": -1}), json!({"state": 999999}), json!({"state": "bad"})] {
+        assert!(h.state_mut().run("history.selectState", params).is_err());
+        assert_eq!(h.state().ui.pen, draft);
+    }
+    history_menu(&mut h, true);
+    assert!(h.state().ui.pen.is_none());
+}
+
+#[test]
+fn closed_pen_appended_named_path_preserves_target_and_other_components() {
+    let mut h = harness();
+    h.state_mut().run("path.set", json!({"name": "named", "path": {"subpaths": [{"closed": true, "knots": [[150,110],[180,110],[180,140]]}]}})).unwrap();
+    h.state_mut().ui.selected_path = Some("named".into());
+    curved_draft(&mut h);
+    click(&mut h, [20.0, 20.0]);
+    let closed = h.state().session.active().unwrap().doc.paths.clone();
+    assert_eq!(closed[0].path.subpaths.len(), 2);
+    history_menu(&mut h, false);
+    assert_eq!(h.state().session.active().unwrap().doc.paths[0].path.subpaths.len(), 1);
+    history_menu(&mut h, true);
+    assert_eq!(h.state().ui.selected_path.as_deref(), Some("named"));
+    assert_eq!(h.state().session.active().unwrap().doc.paths, closed);
+}
+
+#[test]
+fn closed_pen_resumed_path_roundtrip_does_not_duplicate_subpaths() {
+    let mut h = harness();
+    curved_draft(&mut h);
+    h.key_press(Key::Enter);
+    h.run_steps(2);
+    let original = h.state().session.active().unwrap().doc.work_path.clone();
+    click(&mut h, [120.0, 100.0]);
+    click(&mut h, [60.0, 110.0]);
+    let draft = h.state().ui.pen.clone().unwrap();
+    assert!(draft.resumes.is_some());
+    click(&mut h, [20.0, 20.0]);
+    let closed = h.state().session.active().unwrap().doc.work_path.clone();
+    assert_eq!(closed.as_ref().unwrap().subpaths.len(), 1);
+    history_menu(&mut h, false);
+    assert_eq!(h.state().ui.pen.as_ref().unwrap().knots, draft.knots);
+    assert_eq!(h.state().session.active().unwrap().doc.work_path, original);
+    history_menu(&mut h, false);
+    history_menu(&mut h, true);
+    history_menu(&mut h, true);
+    assert_eq!(h.state().session.active().unwrap().doc.work_path, closed);
+}
+
+#[test]
+fn closed_pen_snapshot_limit_preserves_all_redo_instead_of_falling_into_document_undo() {
+    let mut h = harness();
+    for i in 0..70 {
+        crate::vector_ui::pen_down(h.state_mut(), 20.0 + f64::from(i) * 10.0, 20.0, false);
+        crate::vector_ui::pen_up(h.state_mut());
+    }
+    crate::vector_ui::pen_down(h.state_mut(), 20.0, 20.0, false);
+    crate::vector_ui::pen_up(h.state_mut());
+    let closed = h.state().session.active().unwrap().doc.work_path.clone();
+    h.state_mut().run("edit.undo", json!({})).unwrap();
+    for _ in 0..64 {
+        h.state_mut().run("edit.undo", json!({})).unwrap();
+    }
+    let draft = h.state().ui.pen.clone();
+    assert_eq!(draft.as_ref().unwrap().knots.len(), 6);
+    assert!(h.state_mut().run("edit.undo", json!({})).unwrap_err().contains("limit reached"));
+    assert_eq!(h.state().ui.pen, draft);
+    for _ in 0..65 {
+        h.state_mut().run("edit.redo", json!({})).unwrap();
+    }
+    assert!(h.state().ui.pen.is_none());
+    assert_eq!(h.state().session.active().unwrap().doc.work_path, closed);
+}

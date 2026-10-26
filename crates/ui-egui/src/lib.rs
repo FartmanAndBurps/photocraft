@@ -233,6 +233,7 @@ mod tile_overlay;
 mod timeline_ui;
 mod titlebar;
 pub use titlebar::{Caption, CaptionFamily, CaptionIcon, CaptionIcons, CaptionStyle, RenderIconFn};
+mod pen_history;
 pub mod tone;
 mod tool_cursor;
 pub mod tool_feedback;
@@ -692,6 +693,7 @@ type InfoSampleKey = (i32, i32, u64, u32);
 pub struct PhotocraftApp {
     pub session: Session,
     pub ui: UiState,
+    pen_history: pen_history::State,
     pub services: Services,
     /// Canvas caches per (document, display): CPU textures hold monitor values; the GPU
     /// canvas state is shared (`canvas::GPU_OUTPUT`).
@@ -1024,6 +1026,7 @@ impl PhotocraftApp {
         let mut app = Self {
             session,
             ui: UiState::default(),
+            pen_history: Default::default(),
             services,
             canvases: HashMap::new(),
             navigator_textures: HashMap::new(),
@@ -1308,6 +1311,13 @@ impl PhotocraftApp {
         {
             authorize(id, &params)?;
         }
+        if let Some(result) = pen_history::command(self, id, &params) {
+            if let Err(error) = &result {
+                self.ui.status.clone_from(error);
+                self.ui.status_error = true;
+            }
+            return result;
+        }
         // A new layer while Free Transform is open applies the transform first, as Photoshop does
         // (#5667): History reads the transform (or Place Embedded), then New Layer. Only for a
         // command that can run; a transform refused or still being applied keeps the box open and
@@ -1492,6 +1502,7 @@ impl PhotocraftApp {
     }
 
     pub fn sync_views(&mut self) {
+        pen_history::reconcile(self);
         type_transform::cancel_stale(self);
         crate::cam_transform::cancel_stale(self);
         crate::lasso_ui::cancel_stale(self);

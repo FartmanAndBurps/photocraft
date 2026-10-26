@@ -105,9 +105,7 @@ pub(crate) fn invoke_unguarded(app: &mut PhotocraftApp, ctx: &egui::Context, id:
         return r;
     }
     // A pending Pen anchor is gesture state; Edit › Undo must match the keyboard.
-    if id == "edit.undo" && crate::vector_ui::pen_undo_last_point(app) {
-        return Ok(Value::Null);
-    }
+
     // Image › Crop while the Crop tool has a pending frame commits that frame (#1918).
     if id == "image.crop" && crate::crop_ui::pending(app) {
         crate::canvas::commit_crop(app);
@@ -693,8 +691,11 @@ pub fn is_enabled(app: &PhotocraftApp, id: &str) -> bool {
     if id == "ui.symmetryTransform" {
         return crate::symmetry_ui::can_transform(app);
     }
+    if matches!(id, "edit.redo" | "history.redo" | "history.stepForward") && crate::pen_history::can_redo(app) {
+        return true;
+    }
     // Draft Pen points can be undone even when the document has no History entries.
-    if id == "edit.undo" && app.ui.pen.as_ref().is_some_and(|pen| !pen.knots.is_empty()) {
+    if matches!(id, "edit.undo" | "history.undo" | "history.stepBackward") && app.ui.pen.as_ref().is_some_and(|pen| !pen.knots.is_empty()) {
         return true;
     }
     // Photoshop greys these for the Background layer, other layer kinds or single-layer documents.

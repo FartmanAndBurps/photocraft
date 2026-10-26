@@ -559,7 +559,10 @@ pub fn handle(app: &mut PhotocraftApp, ctx: &egui::Context) {
             && !mods.alt
             && ctx.input_mut(|i| i.consume_key(mods, Key::Backspace) || i.consume_key(mods, Key::Delete));
         if command_undo || remove {
-            crate::vector_ui::pen_undo_last_point(app);
+            if let Err(error) = app.run("edit.undo", json!({})) {
+                app.ui.status = error;
+                app.ui.status_error = true;
+            }
             return;
         }
     }

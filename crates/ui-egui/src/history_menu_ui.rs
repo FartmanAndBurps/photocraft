@@ -43,7 +43,8 @@ fn enabled(app: &PhotocraftApp, cmd: &str) -> bool {
         return !app.session.prefs().workspace_locked;
     }
     // An open Free Transform owns the history (see `panels::history`).
-    app.ui.transform.is_none() && app.session.is_enabled(cmd)
+    app.ui.transform.is_none()
+        && if matches!(cmd, "history.stepBackward" | "history.stepForward") { crate::menus::is_enabled(app, cmd) } else { app.session.is_enabled(cmd) }
 }
 
 /// Draw the History items of the panel menu and run the one clicked.
@@ -193,5 +194,26 @@ mod tests {
         for &(label, cmd) in ITEMS.iter().filter(|(l, _)| *l != "---") {
             assert_eq!(is_disabled(&h, label), cmd != Some("window.panel.close"), "{label}");
         }
+    }
+    #[test]
+    fn pen_closure_menu_steps_reopen_retract_restore_and_close() {
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"width": 200, "height": 150})).unwrap();
+        app.ui.tool = crate::state::Tool::Pen;
+        for (x, y) in [(20.0, 20.0), (120.0, 20.0), (120.0, 100.0), (20.0, 20.0)] {
+            crate::vector_ui::pen_down(&mut app, x, y, false);
+            crate::vector_ui::pen_up(&mut app);
+        }
+        let mut h = harness(app);
+        click(&mut h, "Step Backward");
+        assert_eq!(h.state().ui.pen.as_ref().unwrap().knots.len(), 3);
+        assert!(!is_disabled(&h, "Step Backward"), "draft Undo stays enabled with no older document states");
+        click(&mut h, "Step Backward");
+        assert_eq!(h.state().ui.pen.as_ref().unwrap().knots.len(), 2);
+        click(&mut h, "Step Forward");
+        assert_eq!(h.state().ui.pen.as_ref().unwrap().knots.len(), 3);
+        click(&mut h, "Step Forward");
+        assert!(h.state().ui.pen.is_none());
+        assert!(h.state().session.active().unwrap().doc.work_path.as_ref().unwrap().subpaths[0].closed);
     }
 }
