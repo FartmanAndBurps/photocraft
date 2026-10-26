@@ -68,6 +68,7 @@ fn component_move_scale_rotate_commit_once_undo_redo_and_preserve_other_paths() 
         assert_eq!(after.subpaths[0], before.subpaths[0]);
         assert_eq!(after.subpaths[2], before.subpaths[2]);
         let expected = photocraft_doc::Path::new(vec![before.subpaths[1].clone()]).transform(&matrix);
+        assert_eq!(after.subpaths[1].knots.len(), expected.subpaths[0].knots.len());
         for (a, b) in after.subpaths[1].knots.iter().zip(&expected.subpaths[0].knots) {
             for (a, b) in [(a.anchor, b.anchor), (a.in_ctrl, b.in_ctrl), (a.out_ctrl, b.out_ctrl)] {
                 assert!((a.x - b.x).hypot(a.y - b.y) < 1e-6);

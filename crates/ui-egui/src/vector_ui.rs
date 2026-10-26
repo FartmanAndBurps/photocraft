@@ -268,7 +268,7 @@ fn shape_preview(app: &PhotocraftApp, tool: Tool, start: [f64; 2], end: [f64; 2]
     Some(photocraft_doc::ShapeLayer {
         path,
         fill: (!shape_path_mode(o, tool) && o.shape_fill).then(|| tool_paint(app, false)),
-stroke: (!shape_path_mode(o, tool) && o.stroke_width > 0.0).then(|| o.shape_stroke.stroke(o.stroke_width, tool_paint(app, true))),
+        stroke: (!shape_path_mode(o, tool) && o.stroke_width > 0.0).then(|| o.shape_stroke.stroke(o.stroke_width, tool_paint(app, true))),
         ..Default::default()
     })
 }
