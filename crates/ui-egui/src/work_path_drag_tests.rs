@@ -144,14 +144,14 @@ fn stale_document_revision_geometry_target_and_tool_never_fall_back() {
 }
 
 #[test]
-fn named_paths_shape_layers_and_masks_retain_their_existing_route() {
+fn named_misses_are_owned_while_shape_layers_and_masks_keep_their_route() {
     let mut app = app();
     app.run("path.set", json!({"name": "Saved", "path": {"subpaths": [{"knots": [[5,5],[15,15]]}]}})).unwrap();
     app.ui.selected_path = Some("Saved".into());
     let before = app.session.active().unwrap().doc.clone();
     press(&mut app, [10.0, 20.0]);
     assert!(preview(&app).is_none());
-    assert!(finish(&mut app, [10.0, 20.0], [20.0, 20.0]).is_none());
+    assert!(finish(&mut app, [10.0, 20.0], [20.0, 20.0]).unwrap().is_err());
     assert_eq!(app.ui.selected_path.as_deref(), Some("Saved"));
     assert_eq!(app.session.active().unwrap().doc, before);
     app.ui.selected_path = Some("work".into());
@@ -454,4 +454,288 @@ fn explicit_work_target_hides_overlapping_shape_corner_widgets() {
     assert_eq!(preview(&a), Some([11.0, 4.0]));
     up(&mut a, [21.0, 24.0]);
     assert_eq!(a.session.active().unwrap().doc.layers, layers);
+}
+
+fn named_drag_app() -> PhotocraftApp {
+    let mut a = app();
+    for (name, y) in [("Path 1", 110), ("Path 2", 160)] {
+        a.run("path.set", json!({"name":name,"path":{"subpaths":[{"closed":false,"knots":[[40,y],[160,y]]}]}})).unwrap();
+    }
+    a.ui.selected_path = Some("Path 1".into());
+    a
+}
+fn saved(a: &PhotocraftApp, name: &str) -> Path {
+    a.session.active().unwrap().doc.paths.iter().find(|p| p.name == name).unwrap().path.clone()
+}
+#[test]
+fn named_drag_regression_does_not_move_work_or_other_saved_path() {
+    let mut a = named_drag_app();
+    let work0 = work(&a);
+    let other = saved(&a, "Path 2");
+    let before = saved(&a, "Path 1");
+    down(&mut a, [100.0, 110.0]);
+    moving(&mut a, [112.25, 117.5]);
+    up(&mut a, [112.25, 117.5]);
+    assert_eq!(work(&a), work0, "black-arrow named drag must not fall back to Work");
+    assert_eq!(saved(&a, "Path 2"), other);
+    assert_eq!(saved(&a, "Path 1"), before.transform(&Affine::translate(12.25, 7.5)));
+}
+#[test]
+fn named_drag_regression_has_live_fractional_preview_before_commit() {
+    let mut a = named_drag_app();
+    let before = saved(&a, "Path 1");
+    let n = a.session.active().unwrap().history.past_len();
+    down(&mut a, [100.0, 110.0]);
+    moving(&mut a, [112.25, 117.5]);
+    assert_eq!(preview(&a), Some([12.25, 7.5]));
+    assert_eq!(saved(&a, "Path 1"), before);
+    assert_eq!(a.session.active().unwrap().history.past_len(), n);
+}
+
+#[test]
+fn named_drag_each_selected_path_commits_once_and_roundtrips() {
+    for name in ["Path 1", "Path 2", "work"] {
+        let mut a = named_drag_app();
+        if name != "work" {
+            let compound = work(&a);
+            a.run("path.set", json!({"name":name,"path":photocraft_engine::vector_cmds::path_json(&compound)})).unwrap();
+        }
+        a.ui.selected_path = Some(name.into());
+        if name == "work" {
+            select_whole(&mut a);
+        }
+        let doc = a.session.active().unwrap().doc.clone();
+        let n = a.session.active().unwrap().history.past_len();
+        let before = if name == "work" { work(&a) } else { saved(&a, name) };
+        let start = [10.0, 20.0];
+        down(&mut a, start);
+        for delta in [[4.125, 3.25], [12.25, 7.5]] {
+            moving(&mut a, [start[0] + delta[0], start[1] + delta[1]]);
+            assert_eq!(preview(&a), Some(delta));
+            assert_eq!(a.session.active().unwrap().doc, doc);
+        }
+        up(&mut a, [start[0] + 12.25, start[1] + 7.5]);
+        let expected = before.transform(&Affine::translate(12.25, 7.5));
+        if name == "work" {
+            assert_eq!(work(&a), expected);
+        } else {
+            assert_eq!(saved(&a, name), expected);
+            assert_eq!(work(&a), doc.work_path.clone().unwrap());
+        }
+        for path in &doc.paths {
+            if path.name != name {
+                assert_eq!(saved(&a, &path.name), path.path);
+            }
+        }
+        assert_eq!(a.session.active().unwrap().history.past_len(), n + 1);
+        let after = a.session.active().unwrap().doc.clone();
+        a.run("edit.undo", json!({})).unwrap();
+        assert_eq!(a.session.active().unwrap().doc, doc);
+        a.run("edit.redo", json!({})).unwrap();
+        assert_eq!(a.session.active().unwrap().doc, after);
+    }
+}
+#[test]
+fn named_drag_overlaps_use_only_explicit_selection_and_misses_do_nothing() {
+    let mut a = named_drag_app();
+    let same = saved(&a, "Path 1");
+    a.run("path.set", json!({"name":"Path 2","path":photocraft_engine::vector_cmds::path_json(&same)})).unwrap();
+    a.run("shape.create", json!({"kind":"rect","rect":[30,100,140,40]})).unwrap();
+    a.ui.selected_path = Some("Path 2".into());
+    let layers = a.session.active().unwrap().doc.layers.clone();
+    let work0 = work(&a);
+    assert!(!crate::corner_radius::hovers(&a, [40.0, 110.0]));
+    down(&mut a, [40.0, 110.0]);
+    moving(&mut a, [50.25, 117.5]);
+    up(&mut a, [50.25, 117.5]);
+    assert_eq!(saved(&a, "Path 1"), same);
+    assert_eq!(saved(&a, "Path 2"), same.transform(&Affine::translate(10.25, 7.5)));
+    assert_eq!(work(&a), work0);
+    assert_eq!(a.session.active().unwrap().doc.layers, layers);
+    let doc = a.session.active().unwrap().doc.clone();
+    let n = a.session.active().unwrap().history.past_len();
+    down(&mut a, [10.0, 20.0]);
+    moving(&mut a, [30.0, 40.0]);
+    up(&mut a, [30.0, 40.0]);
+    assert_eq!(a.session.active().unwrap().doc, doc);
+    assert_eq!(a.session.active().unwrap().history.past_len(), n);
+}
+#[test]
+fn named_drag_stale_target_document_revision_and_geometry_never_commit() {
+    for reason in ["selection", "revision", "geometry", "document", "rename", "delete", "tool", "focus"] {
+        let mut a = named_drag_app();
+        down(&mut a, [100.0, 110.0]);
+        moving(&mut a, [112.25, 117.5]);
+        match reason {
+            "selection" => a.ui.selected_path = Some("Path 2".into()),
+            "revision" => a.session.active_mut().unwrap().revision += 1,
+            "geometry" => {
+                std::sync::Arc::make_mut(&mut a.session.active_mut().unwrap().doc).paths[0].path = photocraft_vector::shapes::rect(2.0, 2.0, 10.0, 10.0)
+            }
+            "document" => {
+                a.run("file.new", json!({"width":200,"height":200})).unwrap();
+                a.run("path.set", json!({"name":"Path 1","path":{"subpaths":[{"knots":[[40,110],[160,110]]}]}})).unwrap();
+            }
+            "rename" => {
+                a.run("path.rename", json!({"name":"Path 1","to":"Renamed"})).unwrap();
+            }
+            "delete" => {
+                a.run("path.delete", json!({"name":"Path 1"})).unwrap();
+            }
+            "tool" => a.ui.tool = Tool::DirectSelection,
+            "focus" => reconcile(&mut a, false),
+            _ => {}
+        }
+        reconcile(&mut a, true);
+        let doc = a.session.active().unwrap().doc.clone();
+        let n = a.session.active().unwrap().history.past_len();
+        assert!(preview(&a).is_none(), "{reason}");
+        assert!(finish(&mut a, [100.0, 110.0], [112.25, 117.5]).unwrap().is_err(), "{reason}");
+        assert_eq!(a.session.active().unwrap().doc, doc);
+        assert_eq!(a.session.active().unwrap().history.past_len(), n);
+    }
+}
+#[test]
+fn named_drag_actual_panel_switch_cancels_even_if_original_row_is_reselected() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = panel(named_drag_app());
+    let doc = h.state().session.active().unwrap().doc.clone();
+    down(h.state_mut(), [100.0, 110.0]);
+    moving(h.state_mut(), [112.25, 117.5]);
+    assert!(preview(h.state()).is_some());
+    h.get_by_label("Path 2").click();
+    h.run();
+    h.get_by_label("Path 1").click();
+    h.run();
+    assert!(preview(h.state()).is_none());
+    assert!(h.state().drag.is_none());
+    assert!(finish(h.state_mut(), [100.0, 110.0], [112.25, 117.5]).unwrap().is_err());
+    assert_eq!(h.state().session.active().unwrap().doc, doc);
+}
+#[test]
+fn named_drag_primary_secondary_focus_and_escape_share_existing_lifecycle() {
+    for cancel_kind in ["focus", "escape", "none"] {
+        let mut a = named_drag_app();
+        let before = saved(&a, "Path 1");
+        down(&mut a, [100.0, 110.0]);
+        moving(&mut a, [112.25, 117.5]);
+        canvas_frame(&mut a, true, true);
+        canvas_frame(&mut a, false, false);
+        assert_eq!(preview(&a), Some([12.25, 7.5]));
+        match cancel_kind {
+            "focus" => canvas_frame(&mut a, true, false),
+            "escape" => {
+                let ctx = egui::Context::default();
+                PhotocraftApp::setup_context(&ctx, crate::theme::ThemeKind::ALL[0]);
+                let input = egui::RawInput {
+                    events: vec![egui::Event::Key {
+                        key: egui::Key::Escape,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    }],
+                    ..Default::default()
+                };
+                ctx.run_ui(input, |ui| crate::shortcuts::handle(&mut a, ui.ctx())).textures_delta.clear();
+            }
+            _ => {}
+        }
+        if cancel_kind == "none" {
+            up(&mut a, [112.25, 117.5]);
+            assert_eq!(saved(&a, "Path 1"), before.transform(&Affine::translate(12.25, 7.5)));
+        } else {
+            assert!(preview(&a).is_none());
+            assert!(finish(&mut a, [100.0, 110.0], [112.25, 117.5]).unwrap().is_err());
+            assert_eq!(saved(&a, "Path 1"), before);
+        }
+    }
+}
+#[test]
+fn named_drag_overlay_moves_only_eligible_named_outline_and_anchor_squares() {
+    let mut a = named_drag_app();
+    down(&mut a, [100.0, 110.0]);
+    let xf = crate::canvas::ViewXform {
+        rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0)),
+        zoom: 1.0,
+        center: [200.0, 100.0],
+        flip: false,
+        rotation: 0.0,
+        aspect: 1.0,
+    };
+    let before = overlay(&a, xf);
+    moving(&mut a, [112.25, 117.5]);
+    let during = overlay(&a, xf);
+    let paths = |s: &[egui::Shape]| s.iter().filter_map(|s| if let egui::Shape::Path(p) = s { Some(p.points.clone()) } else { None }).collect::<Vec<_>>();
+    let a0 = paths(&before);
+    let a1 = paths(&during);
+    assert_eq!(a0.len(), 4);
+    assert_eq!(a1.len(), 4);
+    for (i, (before, after)) in a0.iter().zip(&a1).enumerate() {
+        for (p, q) in before.iter().zip(after) {
+            let delta = if i == 3 { egui::vec2(12.25, 7.5) } else { egui::Vec2::ZERO };
+            assert!((*q - *p - delta).length() < 0.001);
+        }
+    }
+    let squares =
+        |shapes: &[egui::Shape]| shapes.iter().filter_map(|s| if let egui::Shape::Rect(r) = s { Some(r.rect.center()) } else { None }).collect::<Vec<_>>();
+    let b = squares(&before);
+    let d = squares(&during);
+    assert_eq!(b.len(), 24);
+    assert_eq!(d.len(), 24);
+    for (i, (p, q)) in b.iter().zip(&d).enumerate() {
+        let delta = if i >= 20 { egui::vec2(12.25, 7.5) } else { egui::Vec2::ZERO };
+        assert!((*q - *p - delta).length() < 0.001);
+    }
+    // Named Path 2 stays hidden under existing policy; Work remains visible but fixed.
+    if let Some(dir) = std::env::var_os("PHOTOCRAFT_NAMED_DRAG_SNAPSHOT_DIR") {
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(800.0, 600.0)).build_ui_state(
+            move |ui, a: &mut PhotocraftApp| {
+                egui::CentralPanel::default().show(ui, |ui| crate::vector_ui::draw_overlay(a, ui.painter(), &xf, &a.session.active().unwrap().doc));
+            },
+            a,
+        );
+        PhotocraftApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+        h.run_steps(3);
+        h.render().unwrap().save(std::path::PathBuf::from(dir).join("named-live-drag.png")).unwrap();
+    }
+}
+#[test]
+fn named_drag_retains_existing_copied_path_text_geometry_and_identity() {
+    let mut a = named_drag_app();
+    let work0 = work(&a);
+    let named = saved(&a, "Path 1");
+    // Existing text attachment stores copied path geometry, not a live saved-name binding.
+    a.run("path.set", json!({"name":"work","path":photocraft_engine::vector_cmds::path_json(&named)})).unwrap();
+    let id = a.run("type.create", json!({"x":0,"y":0,"text":"Studio","size":16})).unwrap()["layer"].as_u64().unwrap();
+    a.run("type.attachToPath", json!({"layer":id})).unwrap();
+    a.run("path.set", json!({"name":"work","path":photocraft_engine::vector_cmds::path_json(&work0)})).unwrap();
+    a.ui.selected_path = Some("Path 1".into());
+    let layers = a.session.active().unwrap().doc.layers.clone();
+    let pixels = photocraft_compose::flatten(&a.session.active().unwrap().doc);
+    down(&mut a, [100.0, 110.0]);
+    moving(&mut a, [112.25, 117.5]);
+    up(&mut a, [112.25, 117.5]);
+    assert_eq!(a.session.active().unwrap().doc.layers, layers);
+    assert_eq!(work(&a), work0);
+    assert_eq!(photocraft_compose::flatten(&a.session.active().unwrap().doc), pixels);
+    assert_eq!(a.ui.selected_path.as_deref(), Some("Path 1"));
+    a.run("edit.undo", json!({})).unwrap();
+    a.run("edit.redo", json!({})).unwrap();
+    assert_eq!(a.session.active().unwrap().doc.layers, layers);
+}
+#[test]
+fn named_drag_missing_and_hidden_targets_cannot_move_work() {
+    for name in ["Missing", "Path 1"] {
+        let mut a = named_drag_app();
+        a.ui.selected_path = Some(name.into());
+        a.ui.view.show.target_path = false;
+        let doc = a.session.active().unwrap().doc.clone();
+        let n = a.session.active().unwrap().history.past_len();
+        down(&mut a, [100.0, 110.0]);
+        moving(&mut a, [112.25, 117.5]);
+        up(&mut a, [112.25, 117.5]);
+        assert_eq!(a.session.active().unwrap().doc, doc);
+        assert_eq!(a.session.active().unwrap().history.past_len(), n);
+    }
 }

@@ -1069,6 +1069,9 @@ pub fn path_selection_finish(app: &mut PhotocraftApp, start: [f64; 2], end: [f64
         }
         return;
     }
+    if app.ui.selected_path.as_deref().is_some_and(|n| !matches!(n, "work" | "layer")) {
+        return;
+    }
     let (dx, dy) = (end[0] - start[0], end[1] - start[1]);
     let tol = 6.0 / f64::from(app.point_zoom().max(0.01));
     if dx.abs() + dy.abs() < 0.5 {
@@ -1240,8 +1243,11 @@ pub fn draw_overlay(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform
         if let Some(wp) = &doc.work_path
             && (anchors || app.ui.selected_path.as_deref() == Some("work"))
         {
-            let delta =
-                if app.session.active().is_some_and(|st| st.doc.id == doc.id) { crate::work_path_drag::preview(app).unwrap_or([0.0, 0.0]) } else { [0.0, 0.0] };
+            let delta = if app.session.active().is_some_and(|st| st.doc.id == doc.id) {
+                crate::work_path_drag::preview_for(app, &crate::direct_select::PathRef::Work).unwrap_or([0.0, 0.0])
+            } else {
+                [0.0, 0.0]
+            };
             let shown = |p: [f64; 2]| to_scr([p[0] + delta[0], p[1] + delta[1]]);
             draw_outline(painter, wp, &shown, accent);
             if anchors {
@@ -1252,7 +1258,19 @@ pub fn draw_overlay(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform
         }
         // The saved path selected in the Paths panel is the target path (#6550).
         if let Some(p) = selected_saved_path(app) {
-            draw_path(p, anchors);
+            let target = app.ui.selected_path.as_deref().and_then(|name| crate::direct_select::PathRef::path(app, name));
+            let delta = if app.session.active().is_some_and(|st| st.doc.id == doc.id) {
+                target.as_ref().and_then(|r| crate::work_path_drag::preview_for(app, r)).unwrap_or([0.0, 0.0])
+            } else {
+                [0.0, 0.0]
+            };
+            let shown = |p: [f64; 2]| to_scr([p[0] + delta[0], p[1] + delta[1]]);
+            draw_outline(painter, p, &shown, accent);
+            if anchors {
+                for k in p.subpaths.iter().flat_map(|sp| &sp.knots) {
+                    draw_anchor(painter, shown([k.anchor.x, k.anchor.y]), false, accent);
+                }
+            }
         }
         let st = app.session.active();
         if let Some(l) = st.and_then(|s| s.active_layer.and_then(|id| s.doc.layer(id)))
@@ -1907,6 +1925,7 @@ pub fn paths_panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                     if *kind == PathRow::Work {
                         crate::work_path_drag::select_whole(app);
                     } else {
+                        crate::work_path_drag::cancel(app);
                         app.ui.direct_selection = Default::default();
                     }
                 }

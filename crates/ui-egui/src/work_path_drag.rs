@@ -1,12 +1,15 @@
-//! Whole-Work-Path translation is transient until its single release command.
+//! Whole document-path translation (Work or selected saved path) stays transient until release.
 use photocraft_doc::{LayerContent, LayerId, Path};
 use photocraft_geom::Affine;
+#[cfg(test)]
 use serde_json::json;
 
+use crate::direct_select::PathRef;
 use crate::{PhotocraftApp, state::Tool};
 
 #[derive(Clone, Debug, PartialEq)]
 struct Gesture {
+    target: PathRef,
     document: u64,
     revision: u64,
     layer: Option<LayerId>,
@@ -37,10 +40,24 @@ pub fn select_whole(app: &mut PhotocraftApp) {
     app.ui.direct_selection = Default::default();
 }
 
+fn selected_name(app: &PhotocraftApp) -> Option<&str> {
+    app.ui.selected_path.as_deref().filter(|name| !matches!(*name, "work" | "layer"))
+}
+/// Explicit document paths must not be stolen by layer picking or corner widgets.
+pub fn explicit_path(app: &PhotocraftApp) -> bool {
+    selected_work(app) || selected_name(app).is_some()
+}
+
+fn target(app: &PhotocraftApp) -> Option<(PathRef, Path)> {
+    if selected_name(app).is_some() {
+        return crate::direct_select::active_paths(app).into_iter().next();
+    }
+    work_target(app).then(|| app.session.active().and_then(|st| st.doc.work_path.clone()).map(|p| (PathRef::Work, p))).flatten()
+}
+
 fn work_target(app: &PhotocraftApp) -> bool {
     let Some(st) = app.session.active() else { return false };
-    // Preserve upstream layer/mask priority. Named saved paths retain their legacy route;
-    // adding saved-path editing is outside this Work-Path-only change.
+    // Preserve upstream layer/mask priority unless a document path is explicitly selected.
     if app.ui.selected_path.as_deref().is_some_and(|name| name != "work") {
         return false;
     }
@@ -62,12 +79,17 @@ fn work_target(app: &PhotocraftApp) -> bool {
 fn valid(app: &PhotocraftApp, gesture: &Gesture) -> bool {
     app.ui.tool == Tool::PathSelection
         && app.ui.selected_path == gesture.selected_path
-        && work_target(app)
         && app.session.active().is_some_and(|st| {
             st.doc.id.0 == gesture.document
                 && st.revision == gesture.revision
                 && st.active_layer == gesture.layer
-                && st.doc.work_path.as_ref() == Some(&gesture.path)
+                && match &gesture.target {
+                    PathRef::Work => work_target(app) && st.doc.work_path.as_ref() == Some(&gesture.path),
+                    PathRef::Named { document, name } => {
+                        *document == st.doc.id.0 && st.doc.paths.iter().find(|p| p.name == *name).is_some_and(|p| p.path == gesture.path)
+                    }
+                    _ => false,
+                }
         })
 }
 
@@ -84,15 +106,16 @@ fn displacement(start: [f64; 2], end: [f64; 2]) -> Option<[f64; 2]> {
 pub fn press(app: &mut PhotocraftApp, at: [f64; 2]) {
     app.ui.work_path_drag.gesture = None;
     app.ui.work_path_drag.owns_release = false;
-    if !work_target(app) {
+    // Even missing named targets own the press: never fall back to moving Work.
+    app.ui.work_path_drag.owns_release = selected_name(app).is_some();
+    let Some((target, path)) = target(app) else {
         return;
-    }
+    };
     app.ui.work_path_drag.owns_release = true;
     if !app.ui.view.shows(app.ui.view.show.target_path) || displacement(at, at).is_none() {
         return;
     }
     let Some(st) = app.session.active() else { return };
-    let Some(path) = st.doc.work_path.clone() else { return };
     // A missed outline still owns its release and cannot fall through to legacy movement.
     let tol = 6.0 / f64::from(app.point_zoom().max(0.01));
     if photocraft_vector::edit::hit(&path, photocraft_geom::Point::new(at[0], at[1]), tol, &[]).is_none() {
@@ -101,6 +124,7 @@ pub fn press(app: &mut PhotocraftApp, at: [f64; 2]) {
     app.ui.work_path_drag = State {
         explicit: app.ui.work_path_drag.explicit,
         gesture: Some(Gesture {
+            target,
             document: st.doc.id.0,
             revision: st.revision,
             layer: st.active_layer,
@@ -147,6 +171,11 @@ pub fn preview(app: &PhotocraftApp) -> Option<[f64; 2]> {
     displacement(gesture.start, gesture.end)
 }
 
+/// Only the captured path receives the live offset; inactive outlines remain fixed.
+pub fn preview_for(app: &PhotocraftApp, target: &PathRef) -> Option<[f64; 2]> {
+    (app.ui.work_path_drag.gesture.as_ref()?.target == *target).then(|| preview(app)).flatten()
+}
+
 pub fn owns_drag(app: &PhotocraftApp) -> bool {
     app.ui.work_path_drag.owns_release
 }
@@ -169,21 +198,23 @@ pub fn reconcile(app: &mut PhotocraftApp, focused: bool) {
     }
 }
 
-/// None delegates non-Work-Path gestures to upstream. Owned late releases never delegate.
+/// None delegates layer/mask gestures to upstream. Owned late releases never delegate.
 pub fn finish(app: &mut PhotocraftApp, start: [f64; 2], end: [f64; 2]) -> Option<Result<(), String>> {
     if !std::mem::take(&mut app.ui.work_path_drag.owns_release) {
         return None;
     }
-    let Some(gesture) = app.ui.work_path_drag.gesture.take() else { return Some(Err("Work Path drag was cancelled.".into())) };
+    let Some(gesture) = app.ui.work_path_drag.gesture.take() else { return Some(Err("Path drag was cancelled.".into())) };
     if start != gesture.start || !valid(app, &gesture) {
-        return Some(Err("Work Path drag target changed; no path was moved.".into()));
+        return Some(Err("Path drag target changed; no path was moved.".into()));
     }
-    let Some([dx, dy]) = displacement(start, end) else { return Some(Err("Invalid Work Path displacement.".into())) };
+    let Some([dx, dy]) = displacement(start, end) else { return Some(Err("Invalid path displacement.".into())) };
     if dx == 0.0 && dy == 0.0 {
         return Some(Ok(()));
     }
     let moved = gesture.path.transform(&Affine::translate(dx, dy));
-    Some(app.run("path.set", json!({"name": "work", "path": photocraft_engine::vector_cmds::path_json(&moved)})).map(|_| ()))
+    let mut params = gesture.target.params();
+    params["path"] = photocraft_engine::vector_cmds::path_json(&moved);
+    Some(app.run("path.set", params).map(|_| ()))
 }
 
 #[cfg(test)]

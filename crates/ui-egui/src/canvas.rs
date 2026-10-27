@@ -6197,7 +6197,7 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
             match tool {
                 Tool::PathSelection => {
                     let tol = 6.0 / f64::from(app.point_zoom().max(0.01));
-                    if !crate::work_path_drag::selected_work(app)
+                    if !crate::work_path_drag::explicit_path(app)
                         && let Some(st) = app.session.active()
                         && let Some(id) = crate::vector_ui::pick_shape_at(&st.doc, [x, y], tol)
                     {
