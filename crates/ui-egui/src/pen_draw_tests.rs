@@ -922,3 +922,37 @@ fn curvature_draft_segment_finish_insert_uses_canvas_and_keyboard_history() {
     history_key(&mut h, true);
     assert_eq!(path(&h), inserted);
 }
+
+#[test]
+fn component_option_drag_uses_real_canvas_modifier_and_keyboard_history() {
+    let mut h = harness();
+    h.state_mut()
+        .run(
+            "path.set",
+            json!({"name":"work","path":{"subpaths":[
+                {"closed":false,"knots":[[30,30],[170,30]]}, {"closed":false,"knots":[[30,70],[170,70]]}, {"closed":false,"knots":[[30,110],[170,110]]}
+            ]}}),
+        )
+        .unwrap();
+    h.state_mut().ui.tool = Tool::PathSelection;
+    h.state_mut().ui.extras.snap = false;
+    crate::work_path_drag::select_whole(h.state_mut());
+    let before = h.state().session.active().unwrap().doc.work_path.clone().unwrap();
+    mods(&mut h, Modifiers::ALT);
+    let at = screen(&h, [100.0, 70.0]);
+    h.event(egui::Event::PointerMoved(at));
+    h.run_steps(1);
+    button(&mut h, at, true, Modifiers::ALT);
+    move_to(&mut h, [100.0, 70.0], [110.0, 80.0]);
+    let end = screen(&h, [110.0, 80.0]);
+    button(&mut h, end, false, Modifiers::ALT);
+    mods(&mut h, Modifiers::NONE);
+    let after = h.state().session.active().unwrap().doc.work_path.clone().unwrap();
+    assert_eq!(after.subpaths[0], before.subpaths[0]);
+    assert_eq!(after.subpaths[2], before.subpaths[2]);
+    assert_eq!(after.subpaths[1].knots[0].anchor, photocraft_geom::Point::new(40.0, 80.0));
+    history_key(&mut h, false);
+    assert_eq!(h.state().session.active().unwrap().doc.work_path.as_ref().unwrap(), &before);
+    history_key(&mut h, true);
+    assert_eq!(h.state().session.active().unwrap().doc.work_path.as_ref().unwrap(), &after);
+}

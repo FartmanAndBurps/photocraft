@@ -149,18 +149,18 @@ fn named_misses_are_owned_while_shape_layers_and_masks_keep_their_route() {
     app.run("path.set", json!({"name": "Saved", "path": {"subpaths": [{"knots": [[5,5],[15,15]]}]}})).unwrap();
     app.ui.selected_path = Some("Saved".into());
     let before = app.session.active().unwrap().doc.clone();
-    press(&mut app, [10.0, 20.0]);
+    press(&mut app, [10.0, 20.0], false);
     assert!(preview(&app).is_none());
     assert!(finish(&mut app, [10.0, 20.0], [20.0, 20.0]).unwrap().is_err());
     assert_eq!(app.ui.selected_path.as_deref(), Some("Saved"));
     assert_eq!(app.session.active().unwrap().doc, before);
     app.ui.selected_path = Some("work".into());
     app.run("layer.vectorMask.revealAll", json!({})).unwrap();
-    press(&mut app, [10.0, 20.0]);
+    press(&mut app, [10.0, 20.0], false);
     assert!(finish(&mut app, [10.0, 20.0], [20.0, 20.0]).is_none());
     app.ui.vector_mask_target = false;
     app.run("shape.create", json!({"kind":"rect", "rect":[10,20,40,40]})).unwrap();
-    press(&mut app, [10.0, 20.0]);
+    press(&mut app, [10.0, 20.0], false);
     assert!(finish(&mut app, [10.0, 20.0], [20.0, 20.0]).is_none());
 }
 
@@ -737,5 +737,224 @@ fn named_drag_missing_and_hidden_targets_cannot_move_work() {
         up(&mut a, [112.25, 117.5]);
         assert_eq!(a.session.active().unwrap().doc, doc);
         assert_eq!(a.session.active().unwrap().history.past_len(), n);
+    }
+}
+
+fn component_event(a: &mut PhotocraftApp, event: ToolEvent) {
+    tool_event(a, event, egui::Modifiers::ALT);
+}
+fn component_down(a: &mut PhotocraftApp, p: [f64; 2]) {
+    component_event(a, ToolEvent::Down { x: p[0], y: p[1], pressure: 1.0 });
+}
+fn component_move(a: &mut PhotocraftApp, p: [f64; 2]) {
+    component_event(a, ToolEvent::Move { x: p[0], y: p[1], pressure: 1.0 });
+}
+fn component_up(a: &mut PhotocraftApp, p: [f64; 2]) {
+    component_event(a, ToolEvent::Up { x: p[0], y: p[1] });
+}
+#[test]
+fn component_regression_work_option_drag_moves_only_one_curve() {
+    let mut a = app();
+    select_whole(&mut a);
+    let before = work(&a);
+    component_down(&mut a, [220.0, 40.0]);
+    component_move(&mut a, [231.25, 47.5]);
+    component_up(&mut a, [231.25, 47.5]);
+    let after = work(&a);
+    assert_eq!(&after.subpaths[..2], &before.subpaths[..2], "unrelated components must stay fixed");
+    let mut expected = before.clone();
+    let anchors = photocraft_vector::edit::subpath_anchors(&expected, 2);
+    photocraft_vector::edit::move_anchors(&mut expected, &anchors, [11.25, 7.5]).unwrap();
+    assert_eq!(after, expected);
+}
+#[test]
+fn component_regression_named_option_drag_retains_other_paths_and_components() {
+    let mut a = named_drag_app();
+    let original = work(&a);
+    a.run("path.set", json!({"name":"Path 1","path":photocraft_engine::vector_cmds::path_json(&original)})).unwrap();
+    let other = saved(&a, "Path 2");
+    component_down(&mut a, [220.0, 40.0]);
+    component_move(&mut a, [231.25, 47.5]);
+    component_up(&mut a, [231.25, 47.5]);
+    let after = saved(&a, "Path 1");
+    assert_eq!(&after.subpaths[..2], &original.subpaths[..2]);
+    assert_eq!(work(&a), original);
+    assert_eq!(saved(&a, "Path 2"), other);
+}
+
+#[test]
+fn component_each_subpath_work_and_named_has_one_history_step_and_unchanged_neighbours() {
+    for named in [false, true] {
+        for index in 0..3 {
+            let mut a = app();
+            select_whole(&mut a);
+            let original = work(&a);
+            if named {
+                a.run("path.set", json!({"name":"Components","path":photocraft_engine::vector_cmds::path_json(&original)})).unwrap();
+                a.ui.selected_path = Some("Components".into());
+            }
+            let target = PathRef::path(&a, if named { "Components" } else { "work" }).unwrap();
+            let before = if named { saved(&a, "Components") } else { work(&a) };
+            let n = a.session.active().unwrap().history.past_len();
+            let layers = a.session.active().unwrap().doc.layers.clone();
+            let start = [[10.0, 20.0], [140.0, 20.0], [220.0, 40.0]][index];
+            component_down(&mut a, start);
+            assert_eq!(selected_component(&a, &target), Some(index));
+            component_move(&mut a, [start[0] + 12.25, start[1] + 7.5]);
+            for i in 0..3 {
+                assert_eq!(preview_for(&a, &target, i), (i == index).then_some([12.25, 7.5]));
+            }
+            assert_eq!(if named { saved(&a, "Components") } else { work(&a) }, before);
+            component_up(&mut a, [start[0] + 12.25, start[1] + 7.5]);
+            let after = if named { saved(&a, "Components") } else { work(&a) };
+            assert_eq!(a.session.active().unwrap().history.past_len(), n + 1);
+            assert_eq!(selected_component(&a, &target), Some(index));
+            for (i, (old, new)) in before.subpaths.iter().zip(&after.subpaths).enumerate() {
+                if i != index {
+                    assert_eq!(old, new);
+                } else {
+                    assert_eq!(old.closed, new.closed);
+                    assert_eq!(old.op, new.op);
+                    for (k, l) in old.knots.iter().zip(&new.knots) {
+                        assert_eq!(k.smooth, l.smooth);
+                        for (p, q) in [(k.anchor, l.anchor), (k.in_ctrl, l.in_ctrl), (k.out_ctrl, l.out_ctrl)] {
+                            assert_eq!([q.x - p.x, q.y - p.y], [12.25, 7.5]);
+                        }
+                    }
+                }
+            }
+            assert_eq!(before.fill_rule, after.fill_rule);
+            assert_eq!(before.inverted, after.inverted);
+            assert_eq!(a.session.active().unwrap().doc.layers, layers);
+            if named {
+                assert_eq!(work(&a), original);
+            }
+            a.run("edit.undo", json!({})).unwrap();
+            assert_eq!(if named { saved(&a, "Components") } else { work(&a) }, before);
+            a.run("edit.redo", json!({})).unwrap();
+            assert_eq!(if named { saved(&a, "Components") } else { work(&a) }, after);
+        }
+    }
+}
+#[test]
+fn component_option_click_highlights_without_history_and_plain_drag_remains_whole() {
+    let mut a = app();
+    select_whole(&mut a);
+    let before = work(&a);
+    let n = a.session.active().unwrap().history.past_len();
+    component_down(&mut a, [220.0, 40.0]);
+    component_up(&mut a, [220.0, 40.0]);
+    assert_eq!(selected_component(&a, &PathRef::Work), Some(2));
+    assert_eq!(work(&a), before);
+    assert_eq!(a.session.active().unwrap().history.past_len(), n);
+    down(&mut a, [220.0, 40.0]);
+    assert_eq!(selected_component(&a, &PathRef::Work), None);
+    moving(&mut a, [231.25, 47.5]);
+    up(&mut a, [231.25, 47.5]);
+    assert_eq!(work(&a), before.transform(&Affine::translate(11.25, 7.5)));
+}
+#[test]
+fn component_stale_in_range_index_document_target_and_revision_never_fall_back() {
+    for reason in ["shorten", "revision", "document", "target", "invalid_index", "tool", "focus"] {
+        let mut a = named_drag_app();
+        let original = work(&a);
+        a.run("path.set", json!({"name":"Path 1","path":photocraft_engine::vector_cmds::path_json(&original)})).unwrap();
+        component_down(&mut a, [140.0, 20.0]);
+        component_move(&mut a, [152.25, 27.5]);
+        match reason {
+            "shorten" => {
+                let mut changed = original.clone();
+                changed.subpaths.remove(0);
+                a.run("path.set", json!({"name":"Path 1","path":photocraft_engine::vector_cmds::path_json(&changed)})).unwrap();
+            }
+            "revision" => a.session.active_mut().unwrap().revision += 1,
+            "document" => {
+                a.run("file.new", json!({"width":400,"height":200})).unwrap();
+                a.run("path.set", json!({"name":"Path 1","path":photocraft_engine::vector_cmds::path_json(&original)})).unwrap();
+            }
+            "target" => a.ui.selected_path = Some("work".into()),
+            "invalid_index" => a.ui.work_path_drag.selection.as_mut().unwrap().component = Some(usize::MAX),
+            "tool" => a.ui.tool = Tool::DirectSelection,
+            "focus" => reconcile(&mut a, false),
+            _ => {}
+        }
+        reconcile(&mut a, true);
+        let doc = a.session.active().unwrap().doc.clone();
+        let n = a.session.active().unwrap().history.past_len();
+        assert!(preview(&a).is_none(), "{reason}");
+        assert!(finish(&mut a, [140.0, 20.0], [152.25, 27.5]).unwrap().is_err(), "{reason}");
+        assert_eq!(a.session.active().unwrap().doc, doc);
+        assert_eq!(a.session.active().unwrap().history.past_len(), n);
+    }
+}
+#[test]
+fn component_cancel_and_panel_reselection_clear_highlight_without_mutation() {
+    use egui_kittest::kittest::Queryable;
+    let mut a = app();
+    select_whole(&mut a);
+    let before = work(&a);
+    component_down(&mut a, [220.0, 40.0]);
+    component_move(&mut a, [230.0, 50.0]);
+    cancel(&mut a);
+    assert!(finish(&mut a, [220.0, 40.0], [230.0, 50.0]).unwrap().is_err());
+    assert_eq!(work(&a), before);
+    component_down(&mut a, [220.0, 40.0]);
+    component_up(&mut a, [220.0, 40.0]);
+    assert_eq!(selected_component(&a, &PathRef::Work), Some(2));
+    let mut h = panel(a);
+    h.get_by_label("Work Path").click();
+    h.run();
+    assert_eq!(selected_component(h.state(), &PathRef::Work), None);
+    assert_eq!(work(h.state()), before);
+}
+#[test]
+fn component_overlay_only_shifts_selected_subpath_and_preserves_other_targets() {
+    let mut a = named_drag_app();
+    let original = work(&a).transform(&Affine::translate(0.0, 90.0));
+    a.run("path.set", json!({"name":"Path 1","path":photocraft_engine::vector_cmds::path_json(&original)})).unwrap();
+    let target = PathRef::path(&a, "Path 1").unwrap();
+    component_down(&mut a, [140.0, 110.0]);
+    let xf = crate::canvas::ViewXform {
+        rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0)),
+        zoom: 1.0,
+        center: [200.0, 100.0],
+        flip: false,
+        rotation: 0.0,
+        aspect: 1.0,
+    };
+    let before = overlay(&a, xf);
+    component_move(&mut a, [160.0, 130.0]);
+    let during = overlay(&a, xf);
+    let paths = |s: &[egui::Shape]| s.iter().filter_map(|s| if let egui::Shape::Path(p) = s { Some(p.points.clone()) } else { None }).collect::<Vec<_>>();
+    let old = paths(&before);
+    let new = paths(&during);
+    assert_eq!(old.len(), 6);
+    assert_eq!(new.len(), 6);
+    for (i, (p, q)) in old.iter().zip(&new).enumerate() {
+        for (p, q) in p.iter().zip(q) {
+            let delta = if i == 4 { egui::vec2(20.0, 20.0) } else { egui::Vec2::ZERO };
+            assert!((*q - *p - delta).length() < 0.001);
+        }
+    }
+    let squares = |s: &[egui::Shape]| s.iter().filter_map(|s| if let egui::Shape::Rect(r) = s { Some(r.rect.center()) } else { None }).collect::<Vec<_>>();
+    let old = squares(&before);
+    let new = squares(&during);
+    assert_eq!(old.len(), 40);
+    assert_eq!(new.len(), 40);
+    for (i, (p, q)) in old.iter().zip(&new).enumerate() {
+        let delta = if (28..36).contains(&i) { egui::vec2(20.0, 20.0) } else { egui::Vec2::ZERO };
+        assert!((*q - *p - delta).length() < 0.001);
+    }
+    assert_eq!(selected_component(&a, &target), Some(1));
+    if let Some(dir) = std::env::var_os("PHOTOCRAFT_COMPONENT_DRAG_SNAPSHOT_DIR") {
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(800.0, 600.0)).build_ui_state(
+            move |ui, a: &mut PhotocraftApp| {
+                egui::CentralPanel::default().show(ui, |ui| crate::vector_ui::draw_overlay(a, ui.painter(), &xf, &a.session.active().unwrap().doc));
+            },
+            a,
+        );
+        PhotocraftApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+        h.run_steps(3);
+        h.render().unwrap().save(std::path::PathBuf::from(dir).join("component-preview.png")).unwrap();
     }
 }

@@ -1151,24 +1151,50 @@ pub(crate) fn curve_points(p0: [f64; 2], c0: [f64; 2], c1: [f64; 2], p1: [f64; 2
 
 /// Screen polylines for a path (one per subpath).
 pub(crate) fn path_lines(path: &Path, xf: &dyn Fn([f64; 2]) -> Pos2) -> Vec<(Vec<Pos2>, bool)> {
-    path.subpaths
-        .iter()
-        .map(|s| {
-            let n = s.knots.len();
-            let mut pts = Vec::new();
-            let segs = if s.closed { n } else { n.saturating_sub(1) };
-            for i in 0..segs {
-                let (a, b) = (&s.knots[i], &s.knots[(i + 1) % n]);
-                pts.extend(curve_points([a.anchor.x, a.anchor.y], [a.out_ctrl.x, a.out_ctrl.y], [b.in_ctrl.x, b.in_ctrl.y], [b.anchor.x, b.anchor.y], xf));
+    path.subpaths.iter().map(|s| subpath_lines(s, xf)).collect()
+}
+fn subpath_lines(s: &photocraft_doc::vector::Subpath, xf: &dyn Fn([f64; 2]) -> Pos2) -> (Vec<Pos2>, bool) {
+    let n = s.knots.len();
+    let mut pts = Vec::new();
+    let segs = if s.closed { n } else { n.saturating_sub(1) };
+    for i in 0..segs {
+        let (a, b) = (&s.knots[i], &s.knots[(i + 1) % n]);
+        pts.extend(curve_points([a.anchor.x, a.anchor.y], [a.out_ctrl.x, a.out_ctrl.y], [b.in_ctrl.x, b.in_ctrl.y], [b.anchor.x, b.anchor.y], xf));
+    }
+    if pts.is_empty()
+        && let Some(k) = s.knots.first()
+    {
+        pts.push(xf([k.anchor.x, k.anchor.y]));
+    }
+    (pts, s.closed)
+}
+
+fn draw_document_path(
+    app: &PhotocraftApp,
+    painter: &egui::Painter,
+    path: &Path,
+    target: Option<&crate::direct_select::PathRef>,
+    to_scr: &dyn Fn([f64; 2]) -> Pos2,
+    accent: Color32,
+    anchors: bool,
+) {
+    let selected = target.and_then(|t| crate::work_path_drag::selected_component(app, t));
+    for (i, sp) in path.subpaths.iter().enumerate() {
+        let delta = target.and_then(|t| crate::work_path_drag::preview_for(app, t, i)).unwrap_or([0.0, 0.0]);
+        let shown = |p: [f64; 2]| to_scr([p[0] + delta[0], p[1] + delta[1]]);
+        let color = if selected.is_some_and(|s| s != i) { accent.gamma_multiply(0.55) } else { accent };
+        let (pts, closed) = subpath_lines(sp, &shown);
+        if closed {
+            painter.add(egui::Shape::closed_line(pts, Stroke::new(1.0, color)));
+        } else {
+            painter.add(egui::Shape::line(pts, Stroke::new(1.0, color)));
+        }
+        if anchors {
+            for k in &sp.knots {
+                draw_anchor(painter, shown([k.anchor.x, k.anchor.y]), selected == Some(i), color);
             }
-            if pts.is_empty()
-                && let Some(k) = s.knots.first()
-            {
-                pts.push(xf([k.anchor.x, k.anchor.y]));
-            }
-            (pts, s.closed)
-        })
-        .collect()
+        }
+    }
 }
 
 /// A path's outline in the accent colour.
@@ -1243,34 +1269,13 @@ pub fn draw_overlay(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform
         if let Some(wp) = &doc.work_path
             && (anchors || app.ui.selected_path.as_deref() == Some("work"))
         {
-            let delta = if app.session.active().is_some_and(|st| st.doc.id == doc.id) {
-                crate::work_path_drag::preview_for(app, &crate::direct_select::PathRef::Work).unwrap_or([0.0, 0.0])
-            } else {
-                [0.0, 0.0]
-            };
-            let shown = |p: [f64; 2]| to_scr([p[0] + delta[0], p[1] + delta[1]]);
-            draw_outline(painter, wp, &shown, accent);
-            if anchors {
-                for k in wp.subpaths.iter().flat_map(|sp| &sp.knots) {
-                    draw_anchor(painter, shown([k.anchor.x, k.anchor.y]), false, accent);
-                }
-            }
+            let active = app.session.active().is_some_and(|st| st.doc.id == doc.id);
+            draw_document_path(app, painter, wp, active.then_some(&crate::direct_select::PathRef::Work), &to_scr, accent, anchors);
         }
-        // The saved path selected in the Paths panel is the target path (#6550).
         if let Some(p) = selected_saved_path(app) {
-            let target = app.ui.selected_path.as_deref().and_then(|name| crate::direct_select::PathRef::path(app, name));
-            let delta = if app.session.active().is_some_and(|st| st.doc.id == doc.id) {
-                target.as_ref().and_then(|r| crate::work_path_drag::preview_for(app, r)).unwrap_or([0.0, 0.0])
-            } else {
-                [0.0, 0.0]
-            };
-            let shown = |p: [f64; 2]| to_scr([p[0] + delta[0], p[1] + delta[1]]);
-            draw_outline(painter, p, &shown, accent);
-            if anchors {
-                for k in p.subpaths.iter().flat_map(|sp| &sp.knots) {
-                    draw_anchor(painter, shown([k.anchor.x, k.anchor.y]), false, accent);
-                }
-            }
+            let target = app.ui.selected_path.as_deref().and_then(|n| crate::direct_select::PathRef::path(app, n));
+            let active = app.session.active().is_some_and(|st| st.doc.id == doc.id);
+            draw_document_path(app, painter, p, target.as_ref().filter(|_| active), &to_scr, accent, anchors);
         }
         let st = app.session.active();
         if let Some(l) = st.and_then(|s| s.active_layer.and_then(|id| s.doc.layer(id)))

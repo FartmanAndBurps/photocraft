@@ -6203,7 +6203,7 @@ pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers)
                     {
                         let _ = app.run("layer.select", json!({"layer": id.0}));
                     }
-                    crate::work_path_drag::press(app, [x, y]);
+                    crate::work_path_drag::press(app, [x, y], mods.alt);
                 }
                 Tool::Pen => {
                     if !(mods.alt && crate::vector_ui::pen_grab_handle(app, x, y)) {

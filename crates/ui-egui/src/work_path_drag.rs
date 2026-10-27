@@ -1,4 +1,4 @@
-//! Whole document-path translation (Work or selected saved path) stays transient until release.
+//! Guarded whole/component translation for Work and saved paths; transient until release.
 use photocraft_doc::{LayerContent, LayerId, Path};
 use photocraft_geom::Affine;
 #[cfg(test)]
@@ -8,13 +8,18 @@ use crate::direct_select::PathRef;
 use crate::{PhotocraftApp, state::Tool};
 
 #[derive(Clone, Debug, PartialEq)]
-struct Gesture {
+struct Selection {
     target: PathRef,
     document: u64,
     revision: u64,
     layer: Option<LayerId>,
     selected_path: Option<String>,
     path: Path,
+    component: Option<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct Gesture {
     start: [f64; 2],
     end: [f64; 2],
 }
@@ -22,6 +27,7 @@ struct Gesture {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct State {
     gesture: Option<Gesture>,
+    selection: Option<Selection>,
     explicit: Option<(u64, Option<LayerId>)>,
     // A cancelled/invalidated gesture must consume its late release, never retarget it.
     owns_release: bool,
@@ -76,21 +82,38 @@ fn work_target(app: &PhotocraftApp) -> bool {
     st.doc.work_path.is_some()
 }
 
-fn valid(app: &PhotocraftApp, gesture: &Gesture) -> bool {
+fn valid(app: &PhotocraftApp, selection: &Selection) -> bool {
     app.ui.tool == Tool::PathSelection
-        && app.ui.selected_path == gesture.selected_path
+        && selection.component.is_none_or(|i| selection.path.subpaths.get(i).is_some())
+        && app.ui.selected_path == selection.selected_path
         && app.session.active().is_some_and(|st| {
-            st.doc.id.0 == gesture.document
-                && st.revision == gesture.revision
-                && st.active_layer == gesture.layer
-                && match &gesture.target {
-                    PathRef::Work => work_target(app) && st.doc.work_path.as_ref() == Some(&gesture.path),
+            st.doc.id.0 == selection.document
+                && st.revision == selection.revision
+                && st.active_layer == selection.layer
+                && match &selection.target {
+                    PathRef::Work => work_target(app) && st.doc.work_path.as_ref() == Some(&selection.path),
                     PathRef::Named { document, name } => {
-                        *document == st.doc.id.0 && st.doc.paths.iter().find(|p| p.name == *name).is_some_and(|p| p.path == gesture.path)
+                        *document == st.doc.id.0 && st.doc.paths.iter().find(|p| p.name == *name).is_some_and(|p| p.path == selection.path)
                     }
                     _ => false,
                 }
         })
+}
+
+fn snapshot(app: &PhotocraftApp, target: PathRef, path: Path, component: Option<usize>) -> Option<Selection> {
+    let st = app.session.active()?;
+    if component.is_some_and(|i| path.subpaths.get(i).is_none()) {
+        return None;
+    }
+    Some(Selection {
+        target,
+        document: st.doc.id.0,
+        revision: st.revision,
+        layer: st.active_layer,
+        selected_path: app.ui.selected_path.clone(),
+        path,
+        component,
+    })
 }
 
 /// Same finite fractional offset for preview and commit, retaining the old click dead zone.
@@ -103,8 +126,9 @@ fn displacement(start: [f64; 2], end: [f64; 2]) -> Option<[f64; 2]> {
 }
 
 /// Called after upstream's existing shape picking, without changing the selected target.
-pub fn press(app: &mut PhotocraftApp, at: [f64; 2]) {
+pub fn press(app: &mut PhotocraftApp, at: [f64; 2], component: bool) {
     app.ui.work_path_drag.gesture = None;
+    app.ui.work_path_drag.selection = None;
     app.ui.work_path_drag.owns_release = false;
     // Even missing named targets own the press: never fall back to moving Work.
     app.ui.work_path_drag.owns_release = selected_name(app).is_some();
@@ -115,32 +139,25 @@ pub fn press(app: &mut PhotocraftApp, at: [f64; 2]) {
     if !app.ui.view.shows(app.ui.view.show.target_path) || displacement(at, at).is_none() {
         return;
     }
-    let Some(st) = app.session.active() else { return };
     // A missed outline still owns its release and cannot fall through to legacy movement.
     let tol = 6.0 / f64::from(app.point_zoom().max(0.01));
-    if photocraft_vector::edit::hit(&path, photocraft_geom::Point::new(at[0], at[1]), tol, &[]).is_none() {
-        return;
-    }
-    app.ui.work_path_drag = State {
-        explicit: app.ui.work_path_drag.explicit,
-        gesture: Some(Gesture {
-            target,
-            document: st.doc.id.0,
-            revision: st.revision,
-            layer: st.active_layer,
-            selected_path: app.ui.selected_path.clone(),
-            path,
-            start: at,
-            end: at,
-        }),
-        owns_release: true,
+    let hit = photocraft_vector::edit::hit(&path, photocraft_geom::Point::new(at[0], at[1]), tol, &[]);
+    let index = match hit {
+        Some(photocraft_vector::edit::Hit::Anchor([i, _]) | photocraft_vector::edit::Hit::Segment([i, _], _)) => i,
+        _ => return,
     };
+    app.ui.work_path_drag.selection = snapshot(app, target, path, component.then_some(index));
+    app.ui.work_path_drag.gesture = Some(Gesture { start: at, end: at });
+    if component {
+        app.ui.status = "Component selected: Option-drag moves it; ordinary drag moves the whole path.".into();
+        app.ui.status_error = false;
+    }
 }
 
 /// Canvas supplies document coordinates after its existing constraints, before sample gating.
 pub fn motion(app: &mut PhotocraftApp, at: [f64; 2]) {
     let Some(gesture) = app.ui.work_path_drag.gesture.as_ref() else { return };
-    if !valid(app, gesture) || displacement(gesture.start, at).is_none() {
+    if app.ui.work_path_drag.selection.as_ref().is_none_or(|s| !valid(app, s)) || displacement(gesture.start, at).is_none() {
         cancel(app);
         return;
     }
@@ -154,8 +171,8 @@ pub fn after_command(app: &mut PhotocraftApp, id: &str) {
     if !selected_work(app) || id == "layer.select" || id.starts_with("channel.target") {
         app.ui.work_path_drag.explicit = None;
     }
-    if let Some(gesture) = &app.ui.work_path_drag.gesture
-        && (!valid(app, gesture) || id == "layer.select" || id.starts_with("channel.target"))
+    if let Some(selection) = &app.ui.work_path_drag.selection
+        && (!valid(app, selection) || id == "layer.select" || id.starts_with("channel.target"))
     {
         cancel(app);
     }
@@ -164,24 +181,32 @@ pub fn after_command(app: &mut PhotocraftApp, id: &str) {
 /// Renderer consumes an offset, not a cloned or serialized path.
 pub fn preview(app: &PhotocraftApp) -> Option<[f64; 2]> {
     let gesture = app.ui.work_path_drag.gesture.as_ref()?;
+    let selection = app.ui.work_path_drag.selection.as_ref()?;
     let drag = app.drag.as_ref()?;
-    if !valid(app, gesture) || drag.tool != Tool::PathSelection || drag.start != gesture.start {
+    if !valid(app, selection) || drag.tool != Tool::PathSelection || drag.start != gesture.start {
         return None;
     }
     displacement(gesture.start, gesture.end)
 }
 
 /// Only the captured path receives the live offset; inactive outlines remain fixed.
-pub fn preview_for(app: &PhotocraftApp, target: &PathRef) -> Option<[f64; 2]> {
-    (app.ui.work_path_drag.gesture.as_ref()?.target == *target).then(|| preview(app)).flatten()
+pub fn preview_for(app: &PhotocraftApp, target: &PathRef, component: usize) -> Option<[f64; 2]> {
+    let selection = app.ui.work_path_drag.selection.as_ref()?;
+    (selection.target == *target && selection.component.is_none_or(|i| i == component)).then(|| preview(app)).flatten()
+}
+
+pub fn selected_component(app: &PhotocraftApp, target: &PathRef) -> Option<usize> {
+    let s = app.ui.work_path_drag.selection.as_ref()?;
+    (s.target == *target && valid(app, s)).then_some(s.component).flatten()
 }
 
 pub fn owns_drag(app: &PhotocraftApp) -> bool {
-    app.ui.work_path_drag.owns_release
+    app.ui.work_path_drag.owns_release || app.ui.work_path_drag.selection.as_ref().is_some_and(|s| s.component.is_some() && valid(app, s))
 }
 
 pub fn cancel(app: &mut PhotocraftApp) {
     app.ui.work_path_drag.gesture = None;
+    app.ui.work_path_drag.selection = None;
     if app.drag.as_ref().is_some_and(|d| d.tool == Tool::PathSelection) {
         app.drag = None;
     }
@@ -191,9 +216,13 @@ pub fn reconcile(app: &mut PhotocraftApp, focused: bool) {
     if !selected_work(app) {
         app.ui.work_path_drag.explicit = None;
     }
+    if app.ui.work_path_drag.selection.as_ref().is_some_and(|s| !valid(app, s)) {
+        cancel(app);
+        return;
+    }
     let Some(gesture) = app.ui.work_path_drag.gesture.as_ref() else { return };
     let lost = app.drag.as_ref().is_none_or(|d| d.tool != Tool::PathSelection || d.start != gesture.start);
-    if !focused || lost || !valid(app, gesture) {
+    if !focused || lost {
         cancel(app);
     }
 }
@@ -203,18 +232,38 @@ pub fn finish(app: &mut PhotocraftApp, start: [f64; 2], end: [f64; 2]) -> Option
     if !std::mem::take(&mut app.ui.work_path_drag.owns_release) {
         return None;
     }
-    let Some(gesture) = app.ui.work_path_drag.gesture.take() else { return Some(Err("Path drag was cancelled.".into())) };
-    if start != gesture.start || !valid(app, &gesture) {
+    let gesture = app.ui.work_path_drag.gesture.take();
+    let selection = app.ui.work_path_drag.selection.take();
+    let (Some(gesture), Some(selection)) = (gesture, selection) else { return Some(Err("Path drag was cancelled.".into())) };
+    if start != gesture.start || !valid(app, &selection) {
         return Some(Err("Path drag target changed; no path was moved.".into()));
-    }
+    };
     let Some([dx, dy]) = displacement(start, end) else { return Some(Err("Invalid path displacement.".into())) };
     if dx == 0.0 && dy == 0.0 {
+        if selection.component.is_some() {
+            app.ui.work_path_drag.selection = Some(selection);
+        }
         return Some(Ok(()));
     }
-    let moved = gesture.path.transform(&Affine::translate(dx, dy));
-    let mut params = gesture.target.params();
-    params["path"] = photocraft_engine::vector_cmds::path_json(&moved);
-    Some(app.run("path.set", params).map(|_| ()))
+    let mut params = selection.target.params();
+    let result = if let Some(index) = selection.component {
+        let anchors = photocraft_vector::edit::subpath_anchors(&selection.path, index);
+        params["anchors"] = serde_json::json!(anchors);
+        params["move"] = serde_json::json!([dx, dy]);
+        app.run("path.moveAnchors", params).map(|_| ())
+    } else {
+        let moved = selection.path.transform(&Affine::translate(dx, dy));
+        params["path"] = photocraft_engine::vector_cmds::path_json(&moved);
+        app.run("path.set", params).map(|_| ())
+    };
+    if result.is_ok()
+        && selection.component.is_some()
+        && let Some((target, path)) = target(app)
+        && target == selection.target
+    {
+        app.ui.work_path_drag.selection = snapshot(app, target, path, selection.component);
+    }
+    Some(result)
 }
 
 #[cfg(test)]
