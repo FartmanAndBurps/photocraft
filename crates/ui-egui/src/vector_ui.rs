@@ -977,6 +977,14 @@ pub(crate) fn free_transform_path(app: &PhotocraftApp) -> Option<(Value, Path)> 
     if !matches!(app.ui.tool, Tool::PathSelection | Tool::DirectSelection) {
         return None;
     }
+    if let Some(component) = crate::work_path_drag::component_transform(app).ok().flatten() {
+        return Some(component);
+    }
+    if let Some(name) = app.ui.selected_path.as_deref().filter(|n| !matches!(*n, "work" | "layer")) {
+        let path = selected_saved_path(app)?.clone();
+        path.control_bounds()?;
+        return Some((json!({"name": name}), path));
+    }
     let (target, path) = target_path(app)?;
     path.control_bounds()?;
     let params = match target {
@@ -1276,6 +1284,12 @@ pub fn draw_overlay(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform
     // View › Show › Target Path (under Extras) hides the paths; the Pen's path in progress stays.
     // Free Transform Path draws the path through its box instead (transform_tool).
     let paths = app.ui.view.shows(app.ui.view.show.target_path) && app.ui.transform.as_ref().is_none_or(|t| t.path.is_none());
+    if app.ui.view.shows(app.ui.view.show.target_path)
+        && let Some(siblings) = crate::transform_tool::component_siblings(app, doc)
+    {
+        draw_reference_paths(app, painter, doc, &to_scr, accent);
+        draw_outline(painter, &siblings, &to_scr, accent.gamma_multiply(0.6));
+    }
     if paths {
         draw_reference_paths(app, painter, doc, &to_scr, accent);
     }
@@ -1961,7 +1975,7 @@ pub fn paths_panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                     if *kind == PathRow::Work {
                         crate::work_path_drag::select_whole(app);
                     } else {
-                        crate::work_path_drag::cancel(app);
+                        crate::work_path_drag::reset_scope(app);
                         app.ui.direct_selection = Default::default();
                     }
                 }

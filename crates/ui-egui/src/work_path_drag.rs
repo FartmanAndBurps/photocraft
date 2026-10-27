@@ -31,6 +31,8 @@ pub struct State {
     explicit: Option<(u64, Option<LayerId>)>,
     // A cancelled/invalidated gesture must consume its late release, never retarget it.
     owns_release: bool,
+    // Invalidated component scope must never silently become a whole-path/pixel transform.
+    invalid_component: bool,
 }
 
 /// Explicit panel selection overrides active Shape/mask priority only in its own context.
@@ -40,7 +42,7 @@ pub fn selected_work(app: &PhotocraftApp) -> bool {
 }
 
 pub fn select_whole(app: &mut PhotocraftApp) {
-    cancel(app);
+    reset_scope(app);
     app.ui.selected_path = Some("work".into());
     app.ui.work_path_drag.explicit = app.session.active().filter(|st| st.doc.work_path.is_some()).map(|st| (st.doc.id.0, st.active_layer));
     app.ui.direct_selection = Default::default();
@@ -127,6 +129,7 @@ fn displacement(start: [f64; 2], end: [f64; 2]) -> Option<[f64; 2]> {
 
 /// Called after upstream's existing shape picking, without changing the selected target.
 pub fn press(app: &mut PhotocraftApp, at: [f64; 2], component: bool) {
+    app.ui.work_path_drag.invalid_component = false;
     app.ui.work_path_drag.gesture = None;
     app.ui.work_path_drag.selection = None;
     app.ui.work_path_drag.owns_release = false;
@@ -149,7 +152,7 @@ pub fn press(app: &mut PhotocraftApp, at: [f64; 2], component: bool) {
     app.ui.work_path_drag.selection = snapshot(app, target, path, component.then_some(index));
     app.ui.work_path_drag.gesture = Some(Gesture { start: at, end: at });
     if component {
-        app.ui.status = "Component selected: Option-drag moves it; ordinary drag moves the whole path.".into();
+        app.ui.status = "Component selected: Option-drag moves it; Cmd+T scales it; ordinary drag moves the whole path.".into();
         app.ui.status_error = false;
     }
 }
@@ -200,11 +203,49 @@ pub fn selected_component(app: &PhotocraftApp, target: &PathRef) -> Option<usize
     (s.target == *target && valid(app, s)).then_some(s.component).flatten()
 }
 
+/// Explicit row selection starts whole-path scope; ordinary invalidation does not.
+pub fn reset_scope(app: &mut PhotocraftApp) {
+    cancel(app);
+    app.ui.work_path_drag.invalid_component = false;
+}
+
+pub fn component_transform(app: &PhotocraftApp) -> Result<Option<(serde_json::Value, Path)>, String> {
+    if app.ui.tool != Tool::PathSelection {
+        return Ok(None);
+    }
+    if app.ui.work_path_drag.invalid_component {
+        return Err("Path component selection expired; select its row or component again.".into());
+    }
+    let Some(s) = app.ui.work_path_drag.selection.as_ref().filter(|s| s.component.is_some()) else { return Ok(None) };
+    if !valid(app, s) {
+        return Err("Path component target changed; select it again before transforming.".into());
+    }
+    let Some(index) = s.component else { return Ok(None) };
+    let subpath = s.path.subpaths.get(index).ok_or("Path component no longer exists")?;
+    let mut params = s.target.params();
+    params["subpaths"] = serde_json::json!([index]);
+    params["document"] = serde_json::json!(s.document);
+    params["revision"] = serde_json::json!(s.revision);
+    Ok(Some((params, Path { subpaths: vec![subpath.clone()], fill_rule: s.path.fill_rule, inverted: s.path.inverted })))
+}
+
+pub fn transformed(app: &mut PhotocraftApp, params: &serde_json::Value) {
+    let index = params.get("subpaths").and_then(|v| v.as_array()).and_then(|a| a.first()).and_then(|v| v.as_u64()).and_then(|v| usize::try_from(v).ok());
+    if let (Some(index), Some((target, path))) = (index, target(app))
+        && app.session.active().is_some_and(|st| Some(st.doc.id.0) == params.get("document").and_then(|v| v.as_u64()))
+        && target.params().get("name") == params.get("name")
+    {
+        app.ui.work_path_drag.selection = snapshot(app, target, path, Some(index));
+        app.ui.work_path_drag.invalid_component = app.ui.work_path_drag.selection.is_none();
+    }
+}
+
 pub fn owns_drag(app: &PhotocraftApp) -> bool {
     app.ui.work_path_drag.owns_release || app.ui.work_path_drag.selection.as_ref().is_some_and(|s| s.component.is_some() && valid(app, s))
 }
 
 pub fn cancel(app: &mut PhotocraftApp) {
+    app.ui.work_path_drag.invalid_component |= app.ui.work_path_drag.selection.as_ref().is_some_and(|s| s.component.is_some());
     app.ui.work_path_drag.gesture = None;
     app.ui.work_path_drag.selection = None;
     if app.drag.as_ref().is_some_and(|d| d.tool == Tool::PathSelection) {

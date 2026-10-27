@@ -190,8 +190,12 @@ fn corners(r: [f64; 4]) -> [[f64; 2]; 4] {
 /// Start Free Transform on the active layer (or its selected pixels), or on the targeted unlinked
 /// layer mask, alpha channel or Quick Mask.
 pub fn begin(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), String> {
+    crate::work_path_drag::component_transform(app)?;
     if let Some((params, path)) = crate::vector_ui::free_transform_path(app) {
         return begin_path(app, ctx, params, path);
+    }
+    if matches!(app.ui.tool, Tool::PathSelection | Tool::DirectSelection) && app.ui.selected_path.as_deref().is_some_and(|n| !matches!(n, "work" | "layer")) {
+        return Err("Selected path has no transformable geometry; select a valid path.".into());
     }
     if app.session.active().is_some_and(|st| photocraft_engine::float_cmds::floating(st).is_some()) {
         app.run("select.drop", json!({}))?;
@@ -514,12 +518,22 @@ fn begin_lone(
 /// path through it; OK commits one `path.transform` step.
 fn begin_path(app: &mut PhotocraftApp, ctx: &egui::Context, params: serde_json::Value, path: photocraft_doc::vector::Path) -> Result<(), String> {
     let (x0, y0, x1, y1) = path.control_bounds().ok_or("the path has no points to transform")?;
+    let component = params.get("subpaths").is_some();
+    if component && ((x0 == x1 && y0 == y1) || x1 < x0 || y1 < y0 || [x0, y0, x1, y1].iter().any(|v| !v.is_finite())) {
+        return Err("Component has no scalable extent; no transform was started.".into());
+    }
     let st = app.session.active().ok_or("no document")?;
     let doc = st.doc.clone();
     let layer = st.active_layer.or_else(|| doc.layers.first().map(|l| l.id)).ok_or("no layer")?;
     crate::type_tool::commit(app);
     // A straight horizontal or vertical path still gets a box to turn.
-    let rect = [x0, y0, x1.max(x0 + 1.0), y1.max(y0 + 1.0)];
+    let rect = if component {
+        // Give an axis-aligned line a centred frame while retaining its actual geometry pivot.
+        let (px, py) = (if x1 == x0 { 0.5 } else { 0.0 }, if y1 == y0 { 0.5 } else { 0.0 });
+        [x0 - px, y0 - py, x1 + px, y1 + py]
+    } else {
+        [x0, y0, x1.max(x0 + 1.0), y1.max(y0 + 1.0)]
+    };
     let session = app.ui.alloc_id();
     let texture =
         crate::transform_tex::PreviewTextures::new(ctx, format!("transform-{session}"), egui::ColorImage::new([1, 1], vec![Color32::TRANSPARENT]), [1.0, 1.0]);
@@ -650,6 +664,9 @@ pub fn begin_selection(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(
 
 /// Start (or switch an active Free Transform into) Warp mode.
 pub fn begin_warp(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), String> {
+    if component_restricts(app, "edit.transform.warp") {
+        return Err(COMPONENT_SCALE_ONLY.into());
+    }
     if app.ui.transform.as_ref().is_some_and(|t| t.content_aware.is_some()) {
         return Err(CAS_ONLY_SCALES.into());
     }
@@ -669,6 +686,9 @@ pub fn begin_warp(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), St
 /// custom mesh following the current box (so a transform made first carries over). Editable type
 /// gets its own Warp Text style instead ([`enter_type_warp`]).
 pub fn enter_warp(app: &mut PhotocraftApp, ctx: &egui::Context) {
+    if app.ui.transform.as_ref().is_some_and(component_session) {
+        return;
+    }
     if app.ui.transform.as_ref().is_some_and(|t| t.warp.is_none()) && warps_type(app) {
         return enter_type_warp(app, ctx);
     }
@@ -1033,6 +1053,12 @@ const STILL_APPLYING: &str = "Free Transform is still being applied";
 const STILL_WARPING: &str = "Warp is still being applied";
 
 pub fn commit(app: &mut PhotocraftApp) {
+    if app.ui.transform.as_ref().is_some_and(component_session) && !component_valid(app) {
+        cancel(app);
+        app.ui.status = "Component transform cancelled: target or selection changed.".into();
+        app.ui.status_error = true;
+        return;
+    }
     if committing(app).is_some() {
         return;
     }
@@ -1062,6 +1088,10 @@ pub fn commit(app: &mut PhotocraftApp) {
         return;
     }
     if let Some(target) = &t.path {
+        if component_session(&t) && component_matrix(&t).is_none() {
+            keep_open(app, t, preview, COMPONENT_SCALE_ONLY.into());
+            return;
+        }
         let mut p = target.clone();
         match &t.warp {
             Some(w) if w.is_identity() => return,
@@ -1076,8 +1106,10 @@ pub fn commit(app: &mut PhotocraftApp) {
                 }
             },
         }
-        if let Err(e) = app.run("path.transform", p) {
-            keep_open(app, t, preview, e);
+        match app.run("path.transform", p) {
+            Err(e) => keep_open(app, t, preview, e),
+            Ok(_) if component_session(&t) => crate::work_path_drag::transformed(app, target),
+            Ok(_) => {}
         }
         return;
     }
@@ -1168,6 +1200,9 @@ fn keep_open(app: &mut PhotocraftApp, t: TransformSession, preview: Option<Trans
 /// each pointer event, so a press with a tool chosen just before it (`ui.pointer`'s `tool`) goes to
 /// that tool.
 pub fn end_if_left(app: &mut PhotocraftApp) {
+    if app.ui.transform.as_ref().is_some_and(component_session) && !component_valid(app) {
+        return cancel(app);
+    }
     let Some(t) = &app.ui.transform else { return };
     if committing(app).is_some() {
         return;
@@ -1285,7 +1320,57 @@ pub(crate) const SAVE_FOR_WEB: &str = "file.export.saveForWebLegacy";
 
 /// While transforming, Undo and Redo apply to the box: `Some(enabled)` for those commands (and
 /// Toggle Last State, which would change the document under the box), `None` for the rest.
+pub const COMPONENT_SCALE_ONLY: &str = "Path components only support positive scaling and translation. Reselect the Paths-panel row for whole-path transforms.";
+fn component_session(t: &TransformSession) -> bool {
+    t.path.as_ref().is_some_and(|p| p.get("subpaths").is_some())
+}
+fn component_valid(app: &PhotocraftApp) -> bool {
+    let (Some(t), Some(pv)) = (&app.ui.transform, &app.transform_preview) else { return false };
+    app.ui.tool == pv.tool
+        && app.session.active().is_some_and(|st| st.doc.id == pv.doc.id)
+        && crate::work_path_drag::component_transform(app)
+            .ok()
+            .flatten()
+            .is_some_and(|(params, path)| t.path.as_ref() == Some(&params) && pv.path.as_ref() == Some(&path))
+}
+fn component_matrix(t: &TransformSession) -> Option<photocraft_geom::Affine> {
+    let q = t.quad;
+    if t.warp.is_some() || q[0][0] != q[3][0] || q[1][0] != q[2][0] || q[0][1] != q[1][1] || q[2][1] != q[3][1] {
+        return None;
+    }
+    rect_to_quad_affine(t.rect, q)
+        .filter(|a| a.m[0] > 1e-12 && a.m[3] > 1e-12 && a.m[1] == 0.0 && a.m[2] == 0.0 && a.m.iter().all(|v| v.is_finite() && v.abs() <= 1_000_000.0))
+}
+pub fn component_restricts(app: &PhotocraftApp, id: &str) -> bool {
+    let unsupported = (id.starts_with("edit.transform.") && id != "edit.transform.scale")
+        || matches!(
+            id,
+            "edit.transform"
+                | "edit.freeTransformCopy"
+                | "layer.smartObjects.warp"
+                | "edit.contentAwareScale"
+                | "edit.puppetWarp"
+                | "select.transformSelection"
+        );
+    unsupported && (app.ui.transform.as_ref().is_some_and(component_session) || crate::work_path_drag::component_transform(app).map_or(true, |s| s.is_some()))
+}
+pub fn component_siblings(app: &PhotocraftApp, doc: &Document) -> Option<photocraft_doc::Path> {
+    if !component_valid(app) || app.session.active()?.doc.id != doc.id {
+        return None;
+    }
+    let params = app.ui.transform.as_ref()?.path.as_ref()?;
+    let index = params.get("subpaths")?.as_array()?.first()?.as_u64().and_then(|v| usize::try_from(v).ok())?;
+    let name = params.get("name")?.as_str()?;
+    let mut path = if name == "work" { doc.work_path.clone()? } else { doc.paths.iter().find(|p| p.name == name)?.path.clone() };
+    path.subpaths.get(index)?;
+    path.subpaths.remove(index);
+    Some(path)
+}
+
 pub fn is_enabled(app: &PhotocraftApp, id: &str) -> Option<bool> {
+    if component_restricts(app, id) {
+        return Some(false);
+    }
     let t = app.ui.transform.as_ref()?;
     if committing(app).is_some() {
         return box_command(id).then_some(false);
@@ -1344,6 +1429,9 @@ fn box_command(id: &str) -> bool {
 }
 
 pub fn intercept(app: &mut PhotocraftApp, id: &str) -> Option<Result<serde_json::Value, String>> {
+    if component_restricts(app, id) {
+        return Some(Err(COMPONENT_SCALE_ONLY.into()));
+    }
     let warping = app.ui.transform.as_ref()?.warp.is_some();
     if committing(app).is_some() {
         return box_command(id).then(|| Err(if warping { STILL_WARPING } else { STILL_APPLYING }.into()));
@@ -1438,6 +1526,10 @@ fn accepts_outside_click(g: Gesture, end: [f64; 2], tol: f64) -> bool {
 
 /// Pointer input while transforming. Returns false when no transform is active.
 pub fn pointer(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers) -> bool {
+    if app.ui.transform.as_ref().is_some_and(component_session) && !component_valid(app) {
+        cancel(app);
+        return true;
+    }
     let Some(t) = app.ui.transform.clone() else { return false };
     if committing(app).is_some() {
         return true;
@@ -1482,7 +1574,9 @@ pub fn pointer(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers) ->
             if let (Some(g), Some((mode, mods)), Some(s)) = (g, adjusted, app.ui.transform.as_mut())
                 && mode_allows(t.mode, g.hit)
                 && (t.content_aware.is_none() || g.hit != Hit::Outside)
+                && (!component_session(&t) || g.hit != Hit::Outside)
             {
+                let before = s.clone();
                 if t.content_aware.is_some() {
                     let mut mods = mode_mods(mode, g.hit, mods);
                     // Content-Aware Scale: ⌘ neither skews nor distorts.
@@ -1490,6 +1584,9 @@ pub fn pointer(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers) ->
                     apply_drag(s, g, [x, y], mods);
                 } else {
                     apply_mode_drag(s, g, [x, y], mode, type_layer, mods);
+                }
+                if component_session(s) && component_matrix(s).is_none() {
+                    *s = before;
                 }
                 round_to_pixel_grid(app);
             }
@@ -1536,7 +1633,16 @@ fn upright(q: &[[f64; 2]; 4]) -> bool {
 /// The same effective modifiers drive the geometry and decide whether Ctrl is a distortion
 /// gesture rather than the ordinary snap override. Keep type and Content-Aware Scale refusals.
 fn drag_mods(app: &PhotocraftApp, t: &TransformSession, hit: Hit, mods: egui::Modifiers) -> (TransformMode, egui::Modifiers) {
-    let (mode, mods) = if distort_refused(app, t) { scale_not_distort(t.mode, hit, mods) } else { (t.mode, mods) };
+    let (mode, mods) = if component_session(t) {
+        let mut mods = mods;
+        mods.command = false;
+        mods.ctrl = false;
+        (TransformMode::Free, mods)
+    } else if distort_refused(app, t) {
+        scale_not_distort(t.mode, hit, mods)
+    } else {
+        (t.mode, mods)
+    };
     let legacy = app.session.prefs().general.use_legacy_free_transform;
     (mode, legacy_mods(legacy, hit, unlinked_mods(app.ui.transform_unlinked, legacy, hit, mods)))
 }
@@ -2129,6 +2235,7 @@ fn rotate_dir(t: &TransformSession, pv: Option<&TransformPreview>, p: [f64; 2], 
     if !(p[0].is_finite() && p[1].is_finite())
         || t.warp.is_some()
         || t.content_aware.is_some()
+        || component_session(t)
         || matches!(t.mode, TransformMode::Distort | TransformMode::Skew)
     {
         return None;
@@ -2889,7 +2996,7 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let start = row.min_rect().right().min(split);
     let actions = egui::Rect::from_min_max(egui::pos2(start, bar.top()), egui::pos2(start + buttons_w, bar.bottom()));
     let mut btns = ui.new_child(egui::UiBuilder::new().id_salt("transform-actions").max_rect(actions).layout(egui::Layout::right_to_left(egui::Align::Center)));
-    transform_actions(app, &mut btns, warping, t.content_aware.is_none());
+    transform_actions(app, &mut btns, warping, t.content_aware.is_none() && !component_session(&t));
 }
 
 fn transform_fields(app: &mut PhotocraftApp, ui: &mut egui::Ui, t: &TransformSession) {
@@ -2899,6 +3006,10 @@ fn transform_fields(app: &mut PhotocraftApp, ui: &mut egui::Ui, t: &TransformSes
         ui.label(egui::RichText::new(s).color(tk.text_dim).size(12.0));
     };
     position_size_fields(app, ui, t);
+    if component_session(t) {
+        ui.label(tl!("Component scale"));
+        return;
+    }
     crate::widgets::vline(ui, 22.0);
     let mut a = angle as f32;
     let (r, resp) = ui.allocate_exact_size(vec2(18.0, 22.0), egui::Sense::hover());
@@ -3008,13 +3119,15 @@ pub(crate) fn position_size_fields(app: &mut PhotocraftApp, ui: &mut egui::Ui, t
     // in a length), converted at the document's resolution against the box's original side (#6284).
     let units = crate::widgets::FieldUnits { unit: u.unit, dpi: u.dpi, ppi: u.ppi };
     lbl(ui, "W:");
-    let rw = crate::widgets::value_field_extent(ui, &mut w, -wlim_u..=wlim_u, suffix, size_w, places, units, side_w);
+    let rw =
+        crate::widgets::value_field_extent(ui, &mut w, (if component_session(t) { 0.0001 } else { -wlim_u })..=wlim_u, suffix, size_w, places, units, side_w);
     let link = !app.ui.transform_unlinked;
     if crate::icons::button(ui, if link { "link" } else { "unlink" }, 22.0, link, tl!("Maintain aspect ratio")).clicked() {
         app.ui.transform_unlinked = link;
     }
     lbl(ui, "H:");
-    let rh = crate::widgets::value_field_extent(ui, &mut h, -hlim_u..=hlim_u, suffix, size_w, places, units, side_h);
+    let rh =
+        crate::widgets::value_field_extent(ui, &mut h, (if component_session(t) { 0.0001 } else { -hlim_u })..=hlim_u, suffix, size_w, places, units, side_h);
     for r in [&rw, &rh] {
         r.context_menu(|ui| {
             if let Some(name) = crate::rulers::unit_menu(ui, u.unit) {
@@ -3256,6 +3369,10 @@ fn transform_actions(app: &mut PhotocraftApp, ui: &mut egui::Ui, warping: bool, 
 /// Scale the box along its own axes about the reference point.
 fn scale_about_pivot(app: &mut PhotocraftApp, kx: f64, ky: f64) {
     let Some(s) = app.ui.transform.as_mut() else { return };
+    if component_session(s) && (!(kx > 0.0 && ky > 0.0) || !kx.is_finite() || !ky.is_finite()) {
+        return;
+    }
+    let before = s.quad;
     let Some(h) = Homography::rect_to_quad([0.0, 0.0, 1.0, 1.0], s.quad) else { return };
     let Some(inv) = h.inverse() else { return };
     let (pu, pv) = inv.apply(s.pivot[0], s.pivot[1]);
@@ -3264,6 +3381,9 @@ fn scale_about_pivot(app: &mut PhotocraftApp, kx: f64, ky: f64) {
         [x, y]
     };
     s.quad = [m(0.0, 0.0), m(1.0, 0.0), m(1.0, 1.0), m(0.0, 1.0)];
+    if component_session(s) && component_matrix(s).is_none() {
+        s.quad = before;
+    }
 }
 
 fn rotate_about_pivot(app: &mut PhotocraftApp, da: f64) {
@@ -6117,6 +6237,7 @@ mod tests {
         app.sync_views();
         app.run("path.set", json!({"name": "work", "path": {"subpaths": [{"closed": true, "knots": [[10, 10], [30, 10], [30, 20], [10, 20]]}]}})).unwrap();
         app.ui.tool = Tool::PathSelection;
+        crate::work_path_drag::select_whole(&mut app);
         assert!(crate::menus::is_enabled(&app, "edit.freeTransform"), "a path is transformable on the Background");
         let pixels = app.session.active().unwrap().doc.layers[0].surface().cloned();
         let steps = app.session.active().unwrap().history.past_len();
@@ -6233,3 +6354,7 @@ mod tests {
         assert_eq!(matching_anchor(quad, [50.0, 30.0]), None);
     }
 }
+
+#[cfg(test)]
+#[path = "component_scale_ui_tests.rs"]
+mod component_scale_ui_tests;
