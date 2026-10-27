@@ -1476,6 +1476,9 @@ pub struct UiState {
     /// Selected row in the Paths panel ("work" or a saved path name).
     #[serde(default)]
     pub selected_path: Option<String>,
+    /// Display inactive document paths as reference outlines; never changes edit targets.
+    #[serde(default)]
+    pub show_all_paths: bool,
     /// Layers panel kind filter ("pixel", "adjustment", "type", "shape", "smart"); empty = all.
     #[serde(default)]
     pub layer_filter: Vec<String>,
@@ -1680,6 +1683,7 @@ impl Default for UiState {
             work_path_drag: Default::default(),
             corner_radius: None,
             selected_path: None,
+            show_all_paths: false,
             panels: Panels::default(),
             views: Vec::new(),
             dialogs: Vec::new(),

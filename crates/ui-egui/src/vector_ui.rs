@@ -956,7 +956,7 @@ pub(crate) fn delete_key_deletes_work_path(app: &PhotocraftApp) -> bool {
 }
 
 /// The path Path Selection edits: the targeted vector mask, the active shape layer's path, else
-/// the work path.
+/// the selected work path.
 fn target_path(app: &PhotocraftApp) -> Option<(PathTarget, Path)> {
     if crate::work_path_drag::selected_work(app) {
         return app.session.active()?.doc.work_path.clone().map(|p| (PathTarget::Work, p));
@@ -967,6 +967,7 @@ fn target_path(app: &PhotocraftApp) -> Option<(PathTarget, Path)> {
     if let Some((id, p)) = active_shape_path(app) {
         return Some((PathTarget::Shape(id), p));
     }
+    app.ui.selected_path.as_deref().filter(|name| *name == "work")?;
     app.session.active()?.doc.work_path.clone().map(|p| (PathTarget::Work, p))
 }
 
@@ -1236,6 +1237,28 @@ pub(crate) fn selected_saved_path(app: &PhotocraftApp) -> Option<&Path> {
     app.session.active()?.doc.paths.iter().find(|p| p.name == sel).map(|p| &p.path)
 }
 
+/// Reference outlines are view state only: never passed to an editing-target resolver.
+fn draw_reference_paths(app: &PhotocraftApp, painter: &egui::Painter, doc: &Document, to_scr: &dyn Fn([f64; 2]) -> Pos2, accent: Color32) {
+    if !app.ui.show_all_paths {
+        return;
+    }
+    let active = app.session.active().is_some_and(|st| st.doc.id == doc.id);
+    let selected = active.then_some(app.ui.selected_path.as_deref()).flatten();
+    let selected_geometry = match selected {
+        Some("work") => doc.work_path.as_ref(),
+        Some(name) => doc.paths.iter().find(|p| p.name == name).map(|p| &p.path),
+        None => None,
+    };
+    let mut drawn: Vec<&Path> = Vec::new();
+    for (name, path) in doc.work_path.iter().map(|p| ("work", p)).chain(doc.paths.iter().map(|p| (p.name.as_str(), &p.path))) {
+        if selected == Some(name) || selected_geometry == Some(path) || drawn.contains(&path) {
+            continue;
+        }
+        draw_outline(painter, path, to_scr, accent.gamma_multiply(0.45));
+        drawn.push(path);
+    }
+}
+
 /// Work path / active shape path / selected saved path outlines, anchors, and the pen path in
 /// progress.
 pub fn draw_overlay(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform, doc: &Document) {
@@ -1253,6 +1276,9 @@ pub fn draw_overlay(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform
     // View › Show › Target Path (under Extras) hides the paths; the Pen's path in progress stays.
     // Free Transform Path draws the path through its box instead (transform_tool).
     let paths = app.ui.view.shows(app.ui.view.show.target_path) && app.ui.transform.as_ref().is_none_or(|t| t.path.is_none());
+    if paths {
+        draw_reference_paths(app, painter, doc, &to_scr, accent);
+    }
     if app.session.active().is_some_and(|st| st.doc.id == doc.id) && crate::direct_select::shows(app, painter.ctx().input(|i| i.modifiers)) {
         // Direct Selection (or the Pen with ⌘/Ctrl held) draws the paths it edits (#790).
         crate::direct_select::draw_overlay(app, painter, &to_scr, accent, paths);
@@ -1262,17 +1288,19 @@ pub fn draw_overlay(app: &PhotocraftApp, painter: &egui::Painter, xf: &ViewXform
     } else if paths {
         // The shape's or vector mask's path stays visible as an outline with any tool. Path
         // Selection and the Pen tools add anchor squares; Direct Selection has its own overlay
-        // above. The Work Path is drawn only while it is the path selected in the Paths panel or
-        // a path tool is active, as in Photoshop: a Work Path left unselected (one a PSD arrived
-        // with, or after Ctrl-click Load as Selection) would otherwise cover the marching ants (#6551).
+        // above. Document paths are active only when selected in the Paths panel;
+        // Show All Paths draws other document paths separately as reference outlines.
         let anchors = shows_anchors(tool);
         if let Some(wp) = &doc.work_path
-            && (anchors || app.ui.selected_path.as_deref() == Some("work"))
+            && app.ui.selected_path.as_deref() == Some("work")
+            && app.session.active().is_some_and(|st| st.doc.id == doc.id)
         {
             let active = app.session.active().is_some_and(|st| st.doc.id == doc.id);
             draw_document_path(app, painter, wp, active.then_some(&crate::direct_select::PathRef::Work), &to_scr, accent, anchors);
         }
-        if let Some(p) = selected_saved_path(app) {
+        if let Some(p) = selected_saved_path(app)
+            && app.session.active().is_some_and(|st| st.doc.id == doc.id)
+        {
             let target = app.ui.selected_path.as_deref().and_then(|n| crate::direct_select::PathRef::path(app, n));
             let active = app.session.active().is_some_and(|st| st.doc.id == doc.id);
             draw_document_path(app, painter, p, target.as_ref().filter(|_| active), &to_scr, accent, anchors);
@@ -1817,6 +1845,9 @@ fn path_context_actions(entry: &PathEntry, doc: &Document, layer: Option<photocr
 
 pub fn paths_panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
+    if ui.checkbox(&mut app.ui.show_all_paths, tl!("Show All Paths")).changed() {
+        ui.ctx().request_repaint();
+    }
     let Some(st) = app.session.active() else {
         ui.label(egui::RichText::new(tl!("No document")).color(t.text_faint));
         return;
@@ -2338,11 +2369,11 @@ mod tests {
         app.ui.selected_path = Some("Saved".into());
         app.ui.tool = Tool::Move;
         assert_eq!(overlay_shapes(&app, &ctx), 0);
-        // A path tool shows the Work Path it edits even when the panel selection was cleared.
+        // A path tool does not expose a deselected document path.
         app.ui.selected_path = None;
         for tool in [Tool::Pen, Tool::PathSelection] {
             app.ui.tool = tool;
-            assert!(overlay_shapes(&app, &ctx) > 0, "{tool:?}: path tools draw the Work Path");
+            assert_eq!(overlay_shapes(&app, &ctx), 0, "{tool:?}: no selected document path");
         }
     }
 
@@ -3418,3 +3449,7 @@ mod pen_draw_tests;
 #[cfg(test)]
 #[path = "vector_paint_tests.rs"]
 mod paint_tests;
+
+#[cfg(test)]
+#[path = "show_all_paths_tests.rs"]
+mod show_all_paths_tests;

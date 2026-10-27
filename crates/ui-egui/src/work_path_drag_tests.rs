@@ -9,6 +9,7 @@ fn app() -> PhotocraftApp {
     path.subpaths.extend(photocraft_vector::shapes::ellipse(100.0, 20.0, 80.0, 60.0).subpaths);
     path.subpaths.push(Subpath::polyline(&[(220.0, 40.0), (300.0, 60.0)]));
     app.run("path.set", json!({"path": photocraft_engine::vector_cmds::path_json(&path)})).unwrap();
+    app.ui.selected_path = Some("work".into());
     app.ui.tool = Tool::PathSelection;
     app.ui.view.extras = true;
     app.ui.view.show.target_path = true;
@@ -669,11 +670,11 @@ fn named_drag_overlay_moves_only_eligible_named_outline_and_anchor_squares() {
     let paths = |s: &[egui::Shape]| s.iter().filter_map(|s| if let egui::Shape::Path(p) = s { Some(p.points.clone()) } else { None }).collect::<Vec<_>>();
     let a0 = paths(&before);
     let a1 = paths(&during);
-    assert_eq!(a0.len(), 4);
-    assert_eq!(a1.len(), 4);
+    assert_eq!(a0.len(), 1);
+    assert_eq!(a1.len(), 1);
     for (i, (before, after)) in a0.iter().zip(&a1).enumerate() {
         for (p, q) in before.iter().zip(after) {
-            let delta = if i == 3 { egui::vec2(12.25, 7.5) } else { egui::Vec2::ZERO };
+            let delta = if i == 0 { egui::vec2(12.25, 7.5) } else { egui::Vec2::ZERO };
             assert!((*q - *p - delta).length() < 0.001);
         }
     }
@@ -681,13 +682,13 @@ fn named_drag_overlay_moves_only_eligible_named_outline_and_anchor_squares() {
         |shapes: &[egui::Shape]| shapes.iter().filter_map(|s| if let egui::Shape::Rect(r) = s { Some(r.rect.center()) } else { None }).collect::<Vec<_>>();
     let b = squares(&before);
     let d = squares(&during);
-    assert_eq!(b.len(), 24);
-    assert_eq!(d.len(), 24);
+    assert_eq!(b.len(), 4);
+    assert_eq!(d.len(), 4);
     for (i, (p, q)) in b.iter().zip(&d).enumerate() {
-        let delta = if i >= 20 { egui::vec2(12.25, 7.5) } else { egui::Vec2::ZERO };
+        let delta = if i < 4 { egui::vec2(12.25, 7.5) } else { egui::Vec2::ZERO };
         assert!((*q - *p - delta).length() < 0.001);
     }
-    // Named Path 2 stays hidden under existing policy; Work remains visible but fixed.
+    // Only the selected named path is drawn with Show All Paths off.
     if let Some(dir) = std::env::var_os("PHOTOCRAFT_NAMED_DRAG_SNAPSHOT_DIR") {
         let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(800.0, 600.0)).build_ui_state(
             move |ui, a: &mut PhotocraftApp| {
@@ -928,21 +929,21 @@ fn component_overlay_only_shifts_selected_subpath_and_preserves_other_targets() 
     let paths = |s: &[egui::Shape]| s.iter().filter_map(|s| if let egui::Shape::Path(p) = s { Some(p.points.clone()) } else { None }).collect::<Vec<_>>();
     let old = paths(&before);
     let new = paths(&during);
-    assert_eq!(old.len(), 6);
-    assert_eq!(new.len(), 6);
+    assert_eq!(old.len(), 3);
+    assert_eq!(new.len(), 3);
     for (i, (p, q)) in old.iter().zip(&new).enumerate() {
         for (p, q) in p.iter().zip(q) {
-            let delta = if i == 4 { egui::vec2(20.0, 20.0) } else { egui::Vec2::ZERO };
+            let delta = if i == 1 { egui::vec2(20.0, 20.0) } else { egui::Vec2::ZERO };
             assert!((*q - *p - delta).length() < 0.001);
         }
     }
     let squares = |s: &[egui::Shape]| s.iter().filter_map(|s| if let egui::Shape::Rect(r) = s { Some(r.rect.center()) } else { None }).collect::<Vec<_>>();
     let old = squares(&before);
     let new = squares(&during);
-    assert_eq!(old.len(), 40);
-    assert_eq!(new.len(), 40);
+    assert_eq!(old.len(), 20);
+    assert_eq!(new.len(), 20);
     for (i, (p, q)) in old.iter().zip(&new).enumerate() {
-        let delta = if (28..36).contains(&i) { egui::vec2(20.0, 20.0) } else { egui::Vec2::ZERO };
+        let delta = if (8..16).contains(&i) { egui::vec2(20.0, 20.0) } else { egui::Vec2::ZERO };
         assert!((*q - *p - delta).length() < 0.001);
     }
     assert_eq!(selected_component(&a, &target), Some(1));

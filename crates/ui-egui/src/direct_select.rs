@@ -62,6 +62,7 @@ impl PathRef {
                 app.ui.selected_path.as_deref() == Some(name.as_str())
                     && app.session.active().is_some_and(|st| st.doc.id.0 == *document && st.doc.paths.iter().any(|p| p.name == *name))
             }
+            Self::Work => app.ui.selected_path.as_deref() == Some("work"),
             _ => true,
         }
     }
@@ -185,8 +186,9 @@ pub fn shows(app: &PhotocraftApp, mods: Modifiers) -> bool {
         || matches!(app.ui.tool, Tool::AddAnchorPoint | Tool::DeleteAnchorPoint | Tool::ConvertPoint)
 }
 
-/// A selected named path is exclusive. Otherwise: explicit Work, targeted mask/active Shape, then
-/// the work path. The Pen's Auto Add/Delete edits these (`anchor_tools::pen_auto`).
+/// Selected document paths are exclusive; otherwise use the targeted mask/active Shape.
+/// Unselected document paths are never editing candidates, even when shown as references.
+/// The Pen's Auto Add/Delete edits these (`anchor_tools::pen_auto`).
 fn selected_named(app: &PhotocraftApp) -> Option<&str> {
     app.ui.selected_path.as_deref().filter(|n| !matches!(*n, "work" | "layer"))
 }
@@ -203,9 +205,9 @@ pub(crate) fn active_paths(app: &PhotocraftApp) -> Vec<(PathRef, Path)> {
             .collect();
     }
     let layer = crate::vector_ui::targeted_vector_mask(app).or_else(|| crate::vector_ui::active_shape_path(app));
-    let work = app.session.active().and_then(|st| st.doc.work_path.clone());
-    if crate::work_path_drag::selected_work(app) {
-        return work.map(|p| (PathRef::Work, p)).into_iter().chain(layer.map(|(id, p)| (PathRef::Layer(id), p))).collect();
+    let work = app.session.active().filter(|_| app.ui.selected_path.as_deref() == Some("work")).and_then(|st| st.doc.work_path.clone());
+    if app.ui.selected_path.as_deref() == Some("work") {
+        return work.map(|p| (PathRef::Work, p)).into_iter().collect();
     }
     layer.map(|(id, p)| (PathRef::Layer(id), p)).into_iter().chain(work.map(|p| (PathRef::Work, p))).collect()
 }
@@ -222,7 +224,7 @@ pub(crate) fn candidates(app: &PhotocraftApp) -> Vec<(PathRef, Path)> {
         .filter(|p| !p.dragging && !p.knots.is_empty())
         .map(|p| (PathRef::Pen, crate::vector_ui::pen_path(p)));
     let mut out: Vec<_> = pen.into_iter().chain(active_paths(app)).collect();
-    if selected_named(app).is_some() {
+    if selected_named(app).is_some() || app.ui.selected_path.as_deref() == Some("work") {
         return out;
     }
     if let Some(st) = app.session.active() {

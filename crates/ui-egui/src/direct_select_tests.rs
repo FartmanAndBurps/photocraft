@@ -29,6 +29,7 @@ fn with_path(app: &mut PhotocraftApp) {
         [40, 120],
     ]}]});
     app.run("path.set", json!({"name": "work", "path": path})).unwrap();
+    app.ui.selected_path = Some("work".into());
 }
 
 fn work(app: &PhotocraftApp) -> Path {
@@ -409,6 +410,7 @@ fn a_closed_curvature_pen_path_stays_editable_with_the_curvature_pen() {
 fn with_corner_square(app: &mut PhotocraftApp) {
     let path = json!({"subpaths": [{"closed": true, "knots": [[40, 40], [160, 40], [160, 160], [40, 160]]}]});
     app.run("path.set", json!({"name": "work", "path": path})).unwrap();
+    app.ui.selected_path = Some("work".into());
 }
 
 #[test]

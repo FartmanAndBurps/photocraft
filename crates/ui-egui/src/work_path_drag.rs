@@ -64,7 +64,7 @@ fn target(app: &PhotocraftApp) -> Option<(PathRef, Path)> {
 fn work_target(app: &PhotocraftApp) -> bool {
     let Some(st) = app.session.active() else { return false };
     // Preserve upstream layer/mask priority unless a document path is explicitly selected.
-    if app.ui.selected_path.as_deref().is_some_and(|name| name != "work") {
+    if app.ui.selected_path.as_deref() != Some("work") {
         return false;
     }
     if selected_work(app) {

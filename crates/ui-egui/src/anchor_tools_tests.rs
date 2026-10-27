@@ -28,6 +28,7 @@ fn with_path(app: &mut PhotocraftApp) {
         [40, 120],
     ]}]});
     app.run("path.set", json!({"name": "work", "path": path})).unwrap();
+    app.ui.selected_path = Some("work".into());
 }
 
 fn work(app: &PhotocraftApp) -> Path {
@@ -206,6 +207,7 @@ fn the_pen_leaves_open_end_points_alone() {
     let mut app = app(Tool::Pen);
     let path = json!({"subpaths": [{"closed": false, "knots": [[40, 40], [120, 40], [120, 120]]}]});
     app.run("path.set", json!({"name": "work", "path": path})).unwrap();
+    app.ui.selected_path = Some("work".into());
     let before = work(&app);
     for end in [[40.0, 40.0], [120.0, 120.0]] {
         click(&mut app, end, Modifiers::NONE);
