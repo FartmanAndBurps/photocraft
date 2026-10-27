@@ -152,7 +152,7 @@ fn named_misses_are_owned_while_shape_layers_and_masks_keep_their_route() {
     let before = app.session.active().unwrap().doc.clone();
     press(&mut app, [10.0, 20.0], false);
     assert!(preview(&app).is_none());
-    assert!(finish(&mut app, [10.0, 20.0], [20.0, 20.0]).unwrap().is_err());
+    assert!(finish(&mut app, [10.0, 20.0], [20.0, 20.0]).unwrap().is_ok());
     assert_eq!(app.ui.selected_path.as_deref(), Some("Saved"));
     assert_eq!(app.session.active().unwrap().doc, before);
     app.ui.selected_path = Some("work".into());
@@ -958,4 +958,60 @@ fn component_overlay_only_shifts_selected_subpath_and_preserves_other_targets() 
         h.run_steps(3);
         h.render().unwrap().save(std::path::PathBuf::from(dir).join("component-preview.png")).unwrap();
     }
+}
+
+#[test]
+fn uncaptured_releases_preserve_status_and_never_fall_back() {
+    for name in ["work", "Path 1", "Missing"] {
+        for hidden in [false, true] {
+            for moved in [false, true] {
+                for component in [false, true] {
+                    let mut a = named_drag_app();
+                    a.ui.selected_path = Some(name.into());
+                    a.ui.view.show.target_path = !hidden;
+                    let start = if hidden { [100.0, 110.0] } else { [350.0, 180.0] };
+                    let end = if moved { [start[0] + 12.0, start[1] + 7.0] } else { start };
+                    let doc = a.session.active().unwrap().doc.clone();
+                    let history = a.session.active().unwrap().history.past_len();
+                    a.ui.status = "Ready".into();
+                    a.ui.status_error = false;
+                    if component {
+                        component_down(&mut a, start);
+                    } else {
+                        down(&mut a, start);
+                    }
+                    assert!(owns_drag(&a));
+                    assert!(a.ui.work_path_drag.gesture.is_none());
+                    if component {
+                        component_move(&mut a, end);
+                        component_up(&mut a, end);
+                    } else {
+                        moving(&mut a, end);
+                        up(&mut a, end);
+                    }
+                    assert_eq!(a.ui.status, "Ready", "{name}, hidden={hidden}, moved={moved}, component={component}");
+                    assert!(!a.ui.status_error);
+                    assert_eq!(a.session.active().unwrap().doc, doc);
+                    assert_eq!(a.session.active().unwrap().history.past_len(), history);
+                    assert!(!owns_drag(&a));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn captured_cancellation_reports_error_and_next_miss_is_quiet() {
+    let mut a = app();
+    down(&mut a, [10.0, 20.0]);
+    cancel(&mut a);
+    crate::vector_ui::path_selection_finish(&mut a, [10.0, 20.0], [22.0, 27.0]);
+    assert_eq!(a.ui.status, "Path drag was cancelled.");
+    assert!(a.ui.status_error);
+    assert!(!owns_drag(&a));
+    // A new missed press clears cancellation bookkeeping but preserves existing status.
+    down(&mut a, [350.0, 180.0]);
+    assert_eq!(finish(&mut a, [350.0, 180.0], [362.0, 187.0]), Some(Ok(())));
+    assert_eq!(a.ui.status, "Path drag was cancelled.");
+    assert!(a.ui.status_error);
 }

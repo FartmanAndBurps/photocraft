@@ -31,6 +31,8 @@ pub struct State {
     explicit: Option<(u64, Option<LayerId>)>,
     // A cancelled/invalidated gesture must consume its late release, never retarget it.
     owns_release: bool,
+    // Release ownership also covers misses; only a captured gesture can be cancelled.
+    cancelled: bool,
     // Invalidated component scope must never silently become a whole-path/pixel transform.
     invalid_component: bool,
 }
@@ -130,6 +132,7 @@ fn displacement(start: [f64; 2], end: [f64; 2]) -> Option<[f64; 2]> {
 /// Called after upstream's existing shape picking, without changing the selected target.
 pub fn press(app: &mut PhotocraftApp, at: [f64; 2], component: bool) {
     app.ui.work_path_drag.invalid_component = false;
+    app.ui.work_path_drag.cancelled = false;
     app.ui.work_path_drag.gesture = None;
     app.ui.work_path_drag.selection = None;
     app.ui.work_path_drag.owns_release = false;
@@ -245,6 +248,7 @@ pub fn owns_drag(app: &PhotocraftApp) -> bool {
 }
 
 pub fn cancel(app: &mut PhotocraftApp) {
+    app.ui.work_path_drag.cancelled |= app.ui.work_path_drag.gesture.is_some();
     app.ui.work_path_drag.invalid_component |= app.ui.work_path_drag.selection.as_ref().is_some_and(|s| s.component.is_some());
     app.ui.work_path_drag.gesture = None;
     app.ui.work_path_drag.selection = None;
@@ -273,9 +277,14 @@ pub fn finish(app: &mut PhotocraftApp, start: [f64; 2], end: [f64; 2]) -> Option
     if !std::mem::take(&mut app.ui.work_path_drag.owns_release) {
         return None;
     }
+    let cancelled = std::mem::take(&mut app.ui.work_path_drag.cancelled);
     let gesture = app.ui.work_path_drag.gesture.take();
     let selection = app.ui.work_path_drag.selection.take();
-    let (Some(gesture), Some(selection)) = (gesture, selection) else { return Some(Err("Path drag was cancelled.".into())) };
+    if cancelled {
+        return Some(Err("Path drag was cancelled.".into()));
+    }
+    // A miss or hidden/missing target still consumes release to block legacy Work movement.
+    let (Some(gesture), Some(selection)) = (gesture, selection) else { return Some(Ok(())) };
     if start != gesture.start || !valid(app, &selection) {
         return Some(Err("Path drag target changed; no path was moved.".into()));
     };
