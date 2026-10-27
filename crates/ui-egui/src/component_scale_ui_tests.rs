@@ -1,7 +1,7 @@
 use super::*;
 use crate::canvas::tool_event;
 use photocraft_doc::Path;
-fn fixture(name: &str) -> PhotocraftApp {
+pub(super) fn fixture(name: &str) -> PhotocraftApp {
     let mut a = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
     a.run("file.new", json!({"width":400,"height":300})).unwrap();
     a.sync_views();
@@ -22,7 +22,7 @@ fn fixture(name: &str) -> PhotocraftApp {
     tool_event(&mut a, ToolEvent::Up { x: 140.0, y: 80.0 }, egui::Modifiers::ALT);
     a
 }
-fn path(a: &PhotocraftApp, name: &str) -> Path {
+pub(super) fn path(a: &PhotocraftApp, name: &str) -> Path {
     let doc = &a.session.active().unwrap().doc;
     if name == "work" { doc.work_path.clone().unwrap() } else { doc.paths.iter().find(|p| p.name == name).unwrap().path.clone() }
 }
@@ -159,13 +159,11 @@ fn component_scale_ui_tests_real_panel_reselect_clears_scope_without_stale_commi
 fn component_scale_ui_tests_unsupported_modes_presets_warp_and_copy_are_refused() {
     for opened in [false, true] {
         for id in [
-            "edit.transform.rotate",
             "edit.transform.skew",
             "edit.transform.distort",
             "edit.transform.perspective",
             "edit.transform.warp",
             "edit.transform.flipHorizontal",
-            "edit.transform.rotate90Cw",
             "edit.freeTransformCopy",
             "layer.smartObjects.warp",
             "edit.contentAwareScale",
@@ -193,7 +191,7 @@ fn component_scale_ui_tests_unsupported_modes_presets_warp_and_copy_are_refused(
     assert_eq!(a.ui.transform, t);
 }
 #[test]
-fn component_scale_ui_tests_rotation_zone_distort_modifiers_and_reflection_stay_safe() {
+fn component_scale_ui_tests_distort_modifiers_and_reflection_stay_safe() {
     for mods in [egui::Modifiers::COMMAND, egui::Modifiers { command: true, alt: true, shift: true, ..Default::default() }] {
         let mut a = fixture("One");
         begin(&mut a, &egui::Context::default()).unwrap();
@@ -205,10 +203,6 @@ fn component_scale_ui_tests_rotation_zone_distort_modifiers_and_reflection_stay_
     let mut a = fixture("work");
     begin(&mut a, &egui::Context::default()).unwrap();
     let q = a.ui.transform.as_ref().unwrap().quad;
-    assert!(rotate_cursor_dir(&a, [190.0, 150.0]).is_none());
-    pointer(&mut a, ToolEvent::Down { x: 200.0, y: 160.0, pressure: 1.0 }, egui::Modifiers::NONE);
-    pointer(&mut a, ToolEvent::Up { x: 50.0, y: 200.0 }, egui::Modifiers::NONE);
-    assert_eq!(a.ui.transform.as_ref().unwrap().quad, q);
     pointer(&mut a, ToolEvent::Down { x: 180.0, y: 140.0, pressure: 1.0 }, egui::Modifiers::SHIFT);
     pointer(&mut a, ToolEvent::Up { x: 20.0, y: 10.0 }, egui::Modifiers::SHIFT);
     assert_eq!(a.ui.transform.as_ref().unwrap().quad, q);

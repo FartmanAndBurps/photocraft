@@ -665,7 +665,7 @@ pub fn begin_selection(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(
 /// Start (or switch an active Free Transform into) Warp mode.
 pub fn begin_warp(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<(), String> {
     if component_restricts(app, "edit.transform.warp") {
-        return Err(COMPONENT_SCALE_ONLY.into());
+        return Err(COMPONENT_TRANSFORM_ONLY.into());
     }
     if app.ui.transform.as_ref().is_some_and(|t| t.content_aware.is_some()) {
         return Err(CAS_ONLY_SCALES.into());
@@ -1089,7 +1089,7 @@ pub fn commit(app: &mut PhotocraftApp) {
     }
     if let Some(target) = &t.path {
         if component_session(&t) && component_matrix(&t).is_none() {
-            keep_open(app, t, preview, COMPONENT_SCALE_ONLY.into());
+            keep_open(app, t, preview, COMPONENT_TRANSFORM_ONLY.into());
             return;
         }
         let mut p = target.clone();
@@ -1320,7 +1320,8 @@ pub(crate) const SAVE_FOR_WEB: &str = "file.export.saveForWebLegacy";
 
 /// While transforming, Undo and Redo apply to the box: `Some(enabled)` for those commands (and
 /// Toggle Last State, which would change the document under the box), `None` for the rest.
-pub const COMPONENT_SCALE_ONLY: &str = "Path components only support positive scaling and translation. Reselect the Paths-panel row for whole-path transforms.";
+pub const COMPONENT_TRANSFORM_ONLY: &str =
+    "Path components only support positive scaling, rotation and translation. Reselect the Paths-panel row for whole-path transforms.";
 fn component_session(t: &TransformSession) -> bool {
     t.path.as_ref().is_some_and(|p| p.get("subpaths").is_some())
 }
@@ -1334,15 +1335,34 @@ fn component_valid(app: &PhotocraftApp) -> bool {
             .is_some_and(|(params, path)| t.path.as_ref() == Some(&params) && pv.path.as_ref() == Some(&path))
 }
 fn component_matrix(t: &TransformSession) -> Option<photocraft_geom::Affine> {
-    let q = t.quad;
-    if t.warp.is_some() || q[0][0] != q[3][0] || q[1][0] != q[2][0] || q[0][1] != q[1][1] || q[2][1] != q[3][1] {
+    if t.warp.is_some() {
         return None;
     }
-    rect_to_quad_affine(t.rect, q)
-        .filter(|a| a.m[0] > 1e-12 && a.m[3] > 1e-12 && a.m[1] == 0.0 && a.m[2] == 0.0 && a.m.iter().all(|v| v.is_finite() && v.abs() <= 1_000_000.0))
+    let a = rect_to_quad_affine(t.rect, t.quad)?;
+    if a.m.iter().any(|v| !v.is_finite() || v.abs() > 1_000_000.0) {
+        return None;
+    }
+    let [xx, xy, yx, yy, _, _] = a.m;
+    let (sx, sy) = (xx.hypot(xy), yx.hypot(yy));
+    if sx <= 1e-12 || sy <= 1e-12 {
+        return None;
+    }
+    let (ux, uy, vx, vy) = (xx / sx, xy / sx, yx / sy, yy / sy);
+    if (ux * vx + uy * vy).abs() > 64.0 * f64::EPSILON || ux * vy - uy * vx <= 0.0 {
+        return None;
+    }
+    // The legacy affine helper permits approximate parallelograms. A scoped preview must agree
+    // with the committed matrix, not contain a small perspective distortion at the fourth corner.
+    let tolerance = 64.0 * f64::EPSILON * t.quad.iter().flatten().fold(1.0_f64, |v, q| v.max(q.abs()));
+    let predicted = corners(t.rect).map(|q| [xx * q[0] + yx * q[1] + a.m[4], xy * q[0] + yy * q[1] + a.m[5]]);
+    predicted.iter().zip(t.quad).all(|(p, q)| (p[0] - q[0]).abs() <= tolerance && (p[1] - q[1]).abs() <= tolerance).then_some(a)
 }
 pub fn component_restricts(app: &PhotocraftApp, id: &str) -> bool {
-    let unsupported = (id.starts_with("edit.transform.") && id != "edit.transform.scale")
+    let unsupported = (id.starts_with("edit.transform.")
+        && !matches!(
+            id,
+            "edit.transform.scale" | "edit.transform.rotate" | "edit.transform.rotate180" | "edit.transform.rotate90Cw" | "edit.transform.rotate90Ccw"
+        ))
         || matches!(
             id,
             "edit.transform"
@@ -1430,7 +1450,7 @@ fn box_command(id: &str) -> bool {
 
 pub fn intercept(app: &mut PhotocraftApp, id: &str) -> Option<Result<serde_json::Value, String>> {
     if component_restricts(app, id) {
-        return Some(Err(COMPONENT_SCALE_ONLY.into()));
+        return Some(Err(COMPONENT_TRANSFORM_ONLY.into()));
     }
     let warping = app.ui.transform.as_ref()?.warp.is_some();
     if committing(app).is_some() {
@@ -1574,7 +1594,6 @@ pub fn pointer(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers) ->
             if let (Some(g), Some((mode, mods)), Some(s)) = (g, adjusted, app.ui.transform.as_mut())
                 && mode_allows(t.mode, g.hit)
                 && (t.content_aware.is_none() || g.hit != Hit::Outside)
-                && (!component_session(&t) || g.hit != Hit::Outside)
             {
                 let before = s.clone();
                 if t.content_aware.is_some() {
@@ -1585,8 +1604,18 @@ pub fn pointer(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers) ->
                 } else {
                     apply_mode_drag(s, g, [x, y], mode, type_layer, mods);
                 }
-                if component_session(s) && component_matrix(s).is_none() {
-                    *s = before;
+                if component_session(s) {
+                    // Scaling handles cannot reverse either local axis, even if reversing both
+                    // would be mathematically equivalent to a valid 180-degree rotation.
+                    let reverses_scale = mode != TransformMode::Rotate
+                        && matches!(g.hit, Hit::Corner(_) | Hit::Edge(_))
+                        && [1, 3].iter().any(|&i| {
+                            (s.quad[i][0] - s.quad[0][0]) * (g.quad0[i][0] - g.quad0[0][0]) + (s.quad[i][1] - s.quad[0][1]) * (g.quad0[i][1] - g.quad0[0][1])
+                                <= 0.0
+                        });
+                    if reverses_scale || component_matrix(s).is_none() {
+                        *s = before;
+                    }
                 }
                 round_to_pixel_grid(app);
             }
@@ -1637,7 +1666,7 @@ fn drag_mods(app: &PhotocraftApp, t: &TransformSession, hit: Hit, mods: egui::Mo
         let mut mods = mods;
         mods.command = false;
         mods.ctrl = false;
-        (TransformMode::Free, mods)
+        (if t.mode == TransformMode::Rotate { TransformMode::Rotate } else { TransformMode::Free }, mods)
     } else if distort_refused(app, t) {
         scale_not_distort(t.mode, hit, mods)
     } else {
@@ -2235,7 +2264,6 @@ fn rotate_dir(t: &TransformSession, pv: Option<&TransformPreview>, p: [f64; 2], 
     if !(p[0].is_finite() && p[1].is_finite())
         || t.warp.is_some()
         || t.content_aware.is_some()
-        || component_session(t)
         || matches!(t.mode, TransformMode::Distort | TransformMode::Skew)
     {
         return None;
@@ -3006,10 +3034,6 @@ fn transform_fields(app: &mut PhotocraftApp, ui: &mut egui::Ui, t: &TransformSes
         ui.label(egui::RichText::new(s).color(tk.text_dim).size(12.0));
     };
     position_size_fields(app, ui, t);
-    if component_session(t) {
-        ui.label(tl!("Component scale"));
-        return;
-    }
     crate::widgets::vline(ui, 22.0);
     let mut a = angle as f32;
     let (r, resp) = ui.allocate_exact_size(vec2(18.0, 22.0), egui::Sense::hover());
@@ -3017,6 +3041,9 @@ fn transform_fields(app: &mut PhotocraftApp, ui: &mut egui::Ui, t: &TransformSes
     resp.on_hover_text(tl!("Rotate"));
     if crate::widgets::value_field(ui, &mut a, -180.0..=180.0, "°", 60.0).changed() {
         rotate_about_pivot(app, (a as f64 - angle).to_radians());
+    }
+    if component_session(t) {
+        return;
     }
     // Photoshop's H and V skew fields: the box's sides lean by H, its top and bottom by V.
     let (mut h, mut v) = (skew_h as f32, t.skew_v as f32);
@@ -3388,12 +3415,19 @@ fn scale_about_pivot(app: &mut PhotocraftApp, kx: f64, ky: f64) {
 
 fn rotate_about_pivot(app: &mut PhotocraftApp, da: f64) {
     let Some(s) = app.ui.transform.as_mut() else { return };
+    if component_session(s) && !da.is_finite() {
+        return;
+    }
+    let before = s.quad;
     let (sn, cs) = da.sin_cos();
     let c = s.pivot;
     s.quad = s.quad.map(|q| {
         let (x, y) = (q[0] - c[0], q[1] - c[1]);
         [c[0] + x * cs - y * sn, c[1] + x * sn + y * cs]
     });
+    if component_session(s) && component_matrix(s).is_none() {
+        s.quad = before;
+    }
 }
 
 #[cfg(test)]
@@ -6358,3 +6392,7 @@ mod tests {
 #[cfg(test)]
 #[path = "component_scale_ui_tests.rs"]
 mod component_scale_ui_tests;
+
+#[cfg(test)]
+#[path = "component_rotation_ui_tests.rs"]
+mod component_rotation_ui_tests;

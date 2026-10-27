@@ -152,7 +152,7 @@ pub fn press(app: &mut PhotocraftApp, at: [f64; 2], component: bool) {
     app.ui.work_path_drag.selection = snapshot(app, target, path, component.then_some(index));
     app.ui.work_path_drag.gesture = Some(Gesture { start: at, end: at });
     if component {
-        app.ui.status = "Component selected: Option-drag moves it; Cmd+T scales it; ordinary drag moves the whole path.".into();
+        app.ui.status = "Component selected: Option-drag moves it; Cmd+T transforms it; ordinary drag moves the whole path.".into();
         app.ui.status_error = false;
     }
 }

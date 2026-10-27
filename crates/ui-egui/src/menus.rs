@@ -88,7 +88,7 @@ pub fn invoke(app: &mut PhotocraftApp, ctx: &egui::Context, id: &str, params: Va
 /// [`invoke`] without the unsaved-changes prompt, for once the user has already answered it.
 pub(crate) fn invoke_unguarded(app: &mut PhotocraftApp, ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
     if crate::transform_tool::component_restricts(app, id) {
-        return Err(crate::transform_tool::COMPONENT_SCALE_ONLY.into());
+        return Err(crate::transform_tool::COMPONENT_TRANSFORM_ONLY.into());
     }
     if let Some(tool) = crate::tool_shortcuts::tool(id) {
         crate::tool_memory::select(app, tool);
