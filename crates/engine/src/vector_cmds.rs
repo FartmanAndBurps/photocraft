@@ -1000,16 +1000,31 @@ fn transform_component(s: &Session, p: &Value, name: &str) -> Result<Option<(usi
     if p.get("document").and_then(Value::as_u64) != Some(st.doc.id.0) || p.get("revision").and_then(Value::as_u64) != Some(st.revision) {
         return Err(bad(CMD, "stale component target: pass current `document` and `revision`"));
     }
-    if ["layer", "quad", "warp", "style", "mesh", "rect", "angle"].iter().any(|key| p.get(*key).is_some()) {
-        return Err(bad(CMD, "components support only axis-aligned scaling and translation"));
+    if ["layer", "quad", "warp", "style", "mesh", "rect"].iter().any(|key| p.get(*key).is_some()) {
+        return Err(bad(CMD, "components support only affine scaling, rotation and translation"));
     }
-    if p.get("matrix").is_some() && ["translateX", "translateY", "scaleX", "scaleY"].iter().any(|key| p.get(*key).is_some()) {
-        return Err(bad(CMD, "pass either a matrix or numeric scale/translation parameters"));
+    if p.get("matrix").is_some() && ["translateX", "translateY", "scaleX", "scaleY", "angle"].iter().any(|key| p.get(*key).is_some()) {
+        return Err(bad(CMD, "pass either a matrix or numeric scale/rotation/translation parameters"));
     }
     let path = if name == "work" { st.doc.work_path.as_ref() } else { st.doc.paths.iter().find(|p| p.name == name).map(|p| &p.path) }
         .ok_or_else(|| bad(CMD, "component target path does not exist"))?;
     let subpath = path.subpaths.get(index).filter(|sp| !sp.knots.is_empty()).ok_or_else(|| bad(CMD, "component does not exist or is empty"))?;
     Ok(Some((index, Path { subpaths: vec![subpath.clone()], fill_rule: path.fill_rule, inverted: path.inverted })))
+}
+
+/// Positive independent scales followed by a proper 2D rotation have perpendicular columns.
+/// Normalize first so small/large scales do not hide shear or overflow the determinant test.
+fn component_affine(a: &Affine) -> bool {
+    if a.m.iter().any(|v| !v.is_finite()) {
+        return false;
+    }
+    let [xx, xy, yx, yy, _, _] = a.m;
+    let (sx, sy) = (xx.hypot(xy), yx.hypot(yy));
+    if sx <= 1e-12 || sy <= 1e-12 || !sx.is_finite() || !sy.is_finite() {
+        return false;
+    }
+    let (ux, uy, vx, vy) = (xx / sx, xy / sx, yx / sy, yy / sy);
+    (ux * vx + uy * vy).abs() <= 64.0 * f64::EPSILON && ux * vy - uy * vx > 0.0
 }
 
 fn path_transform(s: &mut Session, p: &Value) -> Result<Value> {
@@ -1076,6 +1091,11 @@ fn path_transform(s: &mut Session, p: &Value) -> Result<Value> {
         let (tx, ty) = (number("translateX", 0.0)?, number("translateY", 0.0)?);
         let (sx, sy) = (number("scaleX", 1.0)?, number("scaleY", 1.0)?);
         let angle = number("angle", 0.0)?;
+        if component.is_some() && (sx <= 1e-12 || sy <= 1e-12) {
+            return Err(bad(CMD, "component numeric scales must be positive and nondegenerate"));
+        }
+        // Full turns are exact identity for scoped numeric requests; keep legacy whole-path math.
+        let angle = if component.is_some() { angle % 360.0 } else { angle };
         // An explicit `layer` parameter determines both the transformed path and its pivot (#3062).
         let path = match &component {
             Some((_, path)) => path.clone(),
@@ -1092,10 +1112,9 @@ fn path_transform(s: &mut Session, p: &Value) -> Result<Value> {
     };
     // Validate and calculate before s.edit: malformed selectors never make history or broaden scope.
     if let Some((index, geometry)) = component {
-        let PathMap::Affine(a) = &map else { return Err(bad(CMD, "component transform must be affine scaling")) };
-        let [sx, xy, yx, sy, _, _] = a.m;
-        if xy != 0.0 || yx != 0.0 || sx <= 1e-12 || sy <= 1e-12 || !sx.is_finite() || !sy.is_finite() {
-            return Err(bad(CMD, "component scales must be positive and nondegenerate; rotation, shear and reflection are unsupported"));
+        let PathMap::Affine(a) = &map else { return Err(bad(CMD, "component transform must be affine")) };
+        if !component_affine(a) {
+            return Err(bad(CMD, "component matrix must represent nondegenerate positive scales and proper rotation; shear and reflection are unsupported"));
         }
         let transformed = geometry.transform(a);
         if !finite_path(&transformed) {
@@ -1885,7 +1904,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "path.transform",
             "Free Transform Path",
             [],
-            r##"{"name":str|"work"|"layer"="work","layer":id? (with layer target),"matrix":[a,b,c,d,e,f] | "quad":[[x,y]×4] (Distort/Perspective: where the frame's corners go, clockwise from top-left) | "style"|"mesh"|"warp":… (Warp, as edit.transform.warp) | "translateX":px?,"translateY":px?,"scaleX":factor?,"scaleY":factor?,"angle":degrees?,"rect":[x0,y0,x1,y1]? (the quad's or warp's frame; default = path control bounds)} (numeric transforms pivot on path bounds center). Optional component request: explicit name=work|saved-name, subpaths:[index], document:id, revision:u64; all required. Numeric component transforms pivot on component control bounds. Only positive nondegenerate axis-aligned scale/translation (matrix or numeric); no layer, angle, quad, warp or mixed transform forms. Invalid/stale selectors fail without fallback/history. Omit all selector fields for legacy whole-path transforms."##,
+            r##"{"name":str|"work"|"layer"="work","layer":id? (with layer target),"matrix":[a,b,c,d,e,f] | "quad":[[x,y]×4] (Distort/Perspective: where the frame's corners go, clockwise from top-left) | "style"|"mesh"|"warp":… (Warp, as edit.transform.warp) | "translateX":px?,"translateY":px?,"scaleX":factor?,"scaleY":factor?,"angle":degrees?,"rect":[x0,y0,x1,y1]? (the quad's or warp's frame; default = path control bounds)} (numeric transforms pivot on path bounds center). Optional component request: explicit name=work|saved-name, subpaths:[index], document:id, revision:u64; all required. Numeric component transforms pivot on component control bounds. Positive nondegenerate scale/translation and proper 2D rotation (matrix or numeric angle in degrees). Numeric rotation uses component control-bounds centre; matrix encodes an explicit pivot. Matrix columns must be perpendicular within 64*f64::EPSILON after normalization and have positive orientation. No shear, reflection, layer, quad, warp or mixed transform forms. Invalid/stale selectors fail without fallback/history. Omit all selector fields for legacy whole-path transforms."##,
             has_doc,
             path_transform
         ),

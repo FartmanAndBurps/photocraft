@@ -177,7 +177,6 @@ fn component_transform_tests_rejects_unsupported_and_degenerate_geometry_preserv
         json!([0, 0, 0, 1, 0, 0]),
         json!([-1, 0, 0, 1, 0, 0]),
         json!([1, 0.1, 0, 1, 0, 0]),
-        json!([0, 1, -1, 0, 0, 0]),
         json!([1, 0, 0, 1, 1e100, 0]),
         json!([1, 0, 0, 1, null, 0]),
         json!([1, 0, 0]),
@@ -255,5 +254,227 @@ fn component_transform_tests_whole_path_remains_legacy_when_selector_absent() {
         let before = target(&s, name);
         s.execute("path.transform", json!({"name":name,"matrix":[2,0,0,3,4,5]})).unwrap();
         assert_eq!(target(&s, name), before.transform(&Affine { m: [2.0, 0.0, 0.0, 3.0, 4.0, 5.0] }));
+    }
+}
+
+#[test]
+fn component_rotation_numeric_rotates_only_component_about_local_center() {
+    for name in ["work", "One"] {
+        let mut s = fixture();
+        let original = target(&s, name);
+        let mut p = request(&s, name, 1);
+        p.as_object_mut().unwrap().remove("matrix");
+        p["angle"] = json!(90);
+        s.execute("path.transform", p).unwrap();
+        let after = target(&s, name);
+        assert_eq!(after.subpaths[0], original.subpaths[0]);
+        assert_eq!(after.subpaths[2], original.subpaths[2]);
+        for (a, b) in original.subpaths[1].knots.iter().zip(&after.subpaths[1].knots) {
+            for (a, b) in [(a.anchor, b.anchor), (a.in_ctrl, b.in_ctrl), (a.out_ctrl, b.out_ctrl)] {
+                assert!((b.x - (140.0 - (a.y - 110.0))).abs() < 1e-9);
+                assert!((b.y - (110.0 + (a.x - 140.0))).abs() < 1e-9);
+            }
+        }
+    }
+}
+#[test]
+fn component_rotation_matrix_supports_explicit_pivot_without_reflection() {
+    let mut s = fixture();
+    let original = target(&s, "One");
+    let mut p = request(&s, "One", 1);
+    // 90 degrees around (140,110), using the existing [a,b,c,d,e,f] convention.
+    p["matrix"] = json!([0, 1, -1, 0, 250, -30]);
+    s.execute("path.transform", p).unwrap();
+    let after = target(&s, "One");
+    let k = original.subpaths[1].knots[0].anchor;
+    let q = after.subpaths[1].knots[0].anchor;
+    assert!((q.x - (250.0 - k.y)).abs() < 1e-9 && (q.y - (k.x - 30.0)).abs() < 1e-9);
+    assert_eq!(after.subpaths[0], original.subpaths[0]);
+    assert_eq!(after.subpaths[2], original.subpaths[2]);
+}
+
+#[test]
+fn component_rotation_angles_and_each_open_closed_component_preserve_geometry_and_identity() {
+    for name in ["work", "One"] {
+        for i in 0..3 {
+            for angle in [-450.0, -90.0, -37.5, 0.0, 37.5, 90.0, 180.0, 270.0, 360.0, 720.0, 1_000_000.0] {
+                let mut s = fixture();
+                let before = target(&s, name);
+                let other = target(&s, if name == "work" { "One" } else { "work" });
+                let two = target(&s, "Two");
+                let mut p = request(&s, name, i);
+                p.as_object_mut().unwrap().remove("matrix");
+                p["angle"] = json!(angle);
+                s.execute("path.transform", p).unwrap();
+                let after = target(&s, name);
+                let local = Path { subpaths: vec![before.subpaths[i].clone()], fill_rule: before.fill_rule, inverted: before.inverted };
+                let (x0, y0, x1, y1) = local.control_bounds().unwrap();
+                let (cx, cy) = ((x0 + x1) * 0.5, (y0 + y1) * 0.5);
+                let (sn, cs) = (angle % 360.0_f64).to_radians().sin_cos();
+                for (j, (old, new)) in before.subpaths.iter().zip(&after.subpaths).enumerate() {
+                    if j != i {
+                        assert_eq!(old, new);
+                    } else {
+                        assert_eq!(old.closed, new.closed);
+                        assert_eq!(old.op, new.op);
+                        assert_eq!(old.knots.len(), new.knots.len());
+                        for (old, new) in old.knots.iter().zip(&new.knots) {
+                            assert_eq!(old.smooth, new.smooth);
+                            for (a, b) in [(old.anchor, new.anchor), (old.in_ctrl, new.in_ctrl), (old.out_ctrl, new.out_ctrl)] {
+                                assert!((b.x - (cx + (a.x - cx) * cs - (a.y - cy) * sn)).abs() < 1e-9);
+                                assert!((b.y - (cy + (a.x - cx) * sn + (a.y - cy) * cs)).abs() < 1e-9);
+                            }
+                        }
+                    }
+                }
+                assert_eq!(after.fill_rule, before.fill_rule);
+                assert_eq!(after.inverted, before.inverted);
+                assert_eq!(target(&s, "Two"), two);
+                assert_eq!(target(&s, if name == "work" { "One" } else { "work" }), other);
+            }
+        }
+    }
+}
+#[test]
+fn component_rotation_numeric_and_matrix_match_for_combined_positive_scale_rotation_translation() {
+    for name in ["work", "One"] {
+        for angle in [-123.4_f64, 45.0, 90.0, 180.0] {
+            let mut numeric = fixture();
+            let mut matrix = fixture();
+            let before = target(&numeric, name);
+            let mut p = request(&numeric, name, 1);
+            p.as_object_mut().unwrap().remove("matrix");
+            p["angle"] = json!(angle);
+            p["scaleX"] = json!(1.5);
+            p["scaleY"] = json!(0.75);
+            p["translateX"] = json!(5);
+            p["translateY"] = json!(-3);
+            numeric.execute("path.transform", p).unwrap();
+            let a = Affine::translate(-140.0, -110.0)
+                .then(&Affine { m: [1.5, 0.0, 0.0, 0.75, 0.0, 0.0] })
+                .then(&Affine::rotate(angle.to_radians()))
+                .then(&Affine::translate(145.0, 107.0));
+            let mut p = request(&matrix, name, 1);
+            p["matrix"] = json!(a.m);
+            matrix.execute("path.transform", p).unwrap();
+            let n = target(&numeric, name);
+            let m = target(&matrix, name);
+            assert_eq!(n, m);
+            assert_eq!(n.subpaths[0], before.subpaths[0]);
+            assert_eq!(n.subpaths[2], before.subpaths[2]);
+        }
+    }
+}
+#[test]
+fn component_rotation_invalid_parameters_reject_without_history_or_redo_changes() {
+    let mut s = fixture();
+    let p = request(&s, "One", 1);
+    s.execute("path.transform", p).unwrap();
+    s.execute("edit.undo", json!({})).unwrap();
+    for angle in [json!(null), json!("90"), json!(false), json!([]), json!(1e100), json!(-1_000_001)] {
+        let mut p = request(&s, "One", 1);
+        p.as_object_mut().unwrap().remove("matrix");
+        p["angle"] = angle;
+        reject(&mut s, p);
+    }
+    for m in [
+        json!([-1, 0, 0, 1, 0, 0]),
+        json!([1, 0, 0, -1, 0, 0]),
+        json!([1, 0.01, 0, 1, 0, 0]),
+        json!([1, 0, 1e-9, 1, 0, 0]),
+        json!([0, 0, 0, 1, 0, 0]),
+        json!([1, 1, 2, 2, 0, 0]),
+        json!([1, 0, 0, 1, null, 0]),
+    ] {
+        let mut p = request(&s, "One", 1);
+        p["matrix"] = m;
+        reject(&mut s, p);
+    }
+    for key in ["layer", "quad", "warp", "mesh", "style", "rect"] {
+        let mut p = request(&s, "One", 1);
+        p.as_object_mut().unwrap().remove("matrix");
+        p["angle"] = json!(45);
+        p[key] = json!(0);
+        reject(&mut s, p);
+    }
+    for (sx, sy) in [(-1.0, -1.0), (-1.0, 1.0), (0.0, 2.0), (1e-15, 2.0)] {
+        let mut p = request(&s, "One", 1);
+        p.as_object_mut().unwrap().remove("matrix");
+        p["angle"] = json!(45);
+        p["scaleX"] = json!(sx);
+        p["scaleY"] = json!(sy);
+        reject(&mut s, p);
+    }
+    let mut p = request(&s, "One", 1);
+    p["angle"] = json!(90);
+    reject(&mut s, p);
+}
+#[test]
+fn component_rotation_stale_document_path_index_and_revision_never_fall_back() {
+    for reason in ["revision", "name", "index", "document", "rename", "delete", "edit"] {
+        let mut s = fixture();
+        let mut p = request(&s, "One", 1);
+        p.as_object_mut().unwrap().remove("matrix");
+        p["angle"] = json!(45);
+        match reason {
+            "revision" => p["revision"] = json!(0),
+            "name" => p["name"] = json!("Missing"),
+            "index" => p["subpaths"] = json!([999]),
+            "document" => {
+                s.execute("file.new", json!({"width":100,"height":100})).unwrap();
+            }
+            "rename" => {
+                s.execute("path.rename", json!({"name":"One","to":"Renamed"})).unwrap();
+            }
+            "delete" => {
+                s.execute("path.delete", json!({"name":"One"})).unwrap();
+            }
+            _ => {
+                s.execute("path.transform", json!({"name":"Two","translateX":2})).unwrap();
+            }
+        }
+        reject(&mut s, p);
+    }
+}
+#[test]
+fn component_rotation_undo_redo_branch_text_and_full_turn_noop() {
+    for name in ["work", "One"] {
+        let mut s = fixture();
+        s.execute("type.create", json!({"x":0,"y":0,"text":"Studio","size":16})).unwrap();
+        s.execute("type.attachToPath", json!({})).unwrap();
+        let layers = s.active().unwrap().doc.layers.clone();
+        let original = target(&s, name);
+        let history = s.active().unwrap().history.past_len();
+        let revision = s.active().unwrap().revision;
+        for angle in [0, 360, -720] {
+            let mut p = request(&s, name, 1);
+            p.as_object_mut().unwrap().remove("matrix");
+            p["angle"] = json!(angle);
+            s.execute("path.transform", p).unwrap();
+            assert_eq!(target(&s, name), original);
+            assert_eq!(s.active().unwrap().history.past_len(), history);
+            assert_eq!(s.active().unwrap().revision, revision);
+        }
+        let mut p = request(&s, name, 1);
+        p.as_object_mut().unwrap().remove("matrix");
+        p["angle"] = json!(-45);
+        s.execute("path.transform", p.clone()).unwrap();
+        let rotated = target(&s, name);
+        assert_eq!(s.active().unwrap().history.past_len(), history + 1);
+        for _ in 0..3 {
+            s.execute("edit.undo", json!({})).unwrap();
+            assert_eq!(target(&s, name), original);
+            s.execute("edit.redo", json!({})).unwrap();
+            assert_eq!(target(&s, name), rotated);
+            assert_eq!(s.active().unwrap().doc.layers, layers);
+        }
+        s.execute("edit.undo", json!({})).unwrap();
+        reject(&mut s, p);
+        let mut p = request(&s, name, 2);
+        p.as_object_mut().unwrap().remove("matrix");
+        p["angle"] = json!(90);
+        s.execute("path.transform", p).unwrap();
+        assert_eq!(s.active().unwrap().history.redo_labels().count(), 0);
+        assert_eq!(s.active().unwrap().doc.layers, layers);
     }
 }
