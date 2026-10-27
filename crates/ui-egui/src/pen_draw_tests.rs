@@ -303,7 +303,7 @@ fn space_pan_keeps_the_pen_path_in_progress_visible() {
     assert!(pen_path_painted(&h, screen(&h, [20.0, 20.0])), "drawn after the pan");
 }
 
-// FartCraft closed-path Undo investigation. These tests use the existing canvas harness,
+// PhotoCraft closed-path Undo regression coverage. These tests use the existing canvas harness,
 // menu dispatcher and keyboard route; no installed application or printer is involved.
 fn history_key(h: &mut Harness<'static, PhotocraftApp>, redo: bool) {
     let modifiers = if redo { Modifiers::COMMAND | Modifiers::SHIFT } else { Modifiers::COMMAND };
